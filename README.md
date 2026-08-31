@@ -35,6 +35,7 @@ node app/server/index.mjs
 ```
 
 需要 Node.js 20 或更高版本。构建 FPK：
+
 Windows：
 ```powershell
 ..\fnpack.exe build -d .
