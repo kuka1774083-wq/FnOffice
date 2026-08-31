@@ -1,6 +1,31 @@
 # FnOffice
 
-飞牛 fnOS 网关应用，注册 Office 文件默认打开方式并集成 OnlyOffice。
+飞牛 fnOS 网关应用，注册 Office 文件默认打开方式并集成 OnlyOffice，支持 DOC/DOCX、XLS/XLSX、PPT/PPTX、PDF 等文件类型，以及多人在线协作编辑、保存回写和权限校验。
+
+## 特性
+
+- 通过飞牛统一网关运行，不声明独立应用端口。
+- 自动创建或手动连接 OnlyOffice Document Server。
+- 自动安装使用 `restart=always`，并等待容器真正健康后才完成安装。
+- 支持公网、fnConnect 和内网网关访问，浏览器端不暴露服务端内部地址。
+- 支持 OnlyOffice JWT、实时协作、强制保存和并发文档限制。
+- 编辑器心跳、离线会话清理、临时文件清理和原子回写。
+- 设置页显示 FnOffice 与 OnlyOffice 版本、连接状态和在线会话。
+
+## 飞牛 OS 安装
+
+1. 在飞牛应用中心安装 FnOffice FPK。
+2. 安装向导选择 OnlyOffice 自动安装或手动部署。
+3. 自动安装会下载约 3GB 镜像，并创建 `fnoffice-onlyoffice` 与 `fnoffice-callback-relay` 两个容器；端口仅用于 FnOffice 与 OnlyOffice 内部通信。
+4. 手动模式不会创建、停止或修改用户已有的 Docker 容器，在设置页填写 OnlyOffice 地址和 JWT 配置即可。
+
+安装向导中的端口、镜像、JWT 和移动端界面选项会写入持久化配置，并同步到设置页。
+
+## 手动部署 OnlyOffice
+
+仓库中的 [`app/docker/docker-compose.yaml`](app/docker/docker-compose.yaml) 可直接复制到飞牛 Docker Compose 项目中。请准备一个可写的项目目录，设置 `.env` 中的 `ONLYOFFICE_PORT`、`JWT_SECRET` 和 `FNOFFICE_APPDEST`，启动后在 FnOffice 设置页填写相同地址和密钥。
+
+OnlyOffice 端口是否对外开放取决于管理员的部署方式；如果只供 FnOffice 内部访问，建议使用飞牛防火墙限制来源。
 
 ## 开发运行
 
@@ -9,14 +34,20 @@ $env:FNOS_DEV_MODE='true'
 node app/server/index.mjs
 ```
 
-## 自动安装 OnlyOffice
+需要 Node.js 20 或更高版本。构建 FPK：
 
-安装向导选择自动安装时，FnOffice 会直接创建 `fnoffice-onlyoffice` 和 `fnoffice-callback-relay` Docker 容器，不会创建或管理 Compose 项目。两个容器都使用 `restart=always`。安装回调会前台等待镜像拉取、容器创建以及 OnlyOffice `/healthcheck` 就绪后才报告安装完成，健康检查最长等待 1200 秒；失败会提示先等待 Docker 中的两个镜像下载完毕后再次尝试安装，并保留诊断日志。`wizard_onlyoffice_port` 会同时写入应用配置和手动部署教程使用的 `docker/.env`；设置页从同一份配置读取该端口，因此向导填写的端口不会被默认值覆盖。端口映射到所有网卡，请按需配置飞牛防火墙。
+```powershell
+..\fnpack-1.2.3-windows-amd64.exe build -d .
+```
 
-安装向导还可选择是否区分移动端界面，默认关闭（手机端使用桌面版界面）；开启后会根据设备自动使用 OnlyOffice 移动端编辑器。该选项可在 FnOffice 设置页修改并与持久化配置同步。设置页会根据配置中的 OnlyOffice 地址实时检测并显示版本号，无法连接时显示“未配置”。
+## 目录说明
 
-安装过程点击取消时会终止镜像拉取/健康检查，清理 FnOffice 创建的两个容器，并写入取消结果；同时兼容飞牛通过取消标记文件终止长时间 Docker 操作的情况。
+- `app/server`：FnOffice 网关服务、OnlyOffice 代理和回调处理。
+- `app/ui`：设置页、文档打开页和前端资源。
+- `cmd`：飞牛安装、升级、卸载生命周期脚本。
+- `wizard`：飞牛安装向导配置。
+- `app/docker`：手动部署 OnlyOffice 的 Compose 示例。
 
-如果安装向导选择不自动安装，FnOffice 不会创建、停止或修改任何 Docker 容器；之后仍可在设置页填写外部 OnlyOffice 地址和 JWT 配置。
+## 许可证
 
-仓库中的 Compose 文件仅用于管理员选择手动部署时复制使用，不参与自动安装。OnlyOffice 端口映射到所有网卡。
+本项目采用 MIT License，详见 [`LICENSE`](LICENSE)。
