@@ -1,0 +1,14 @@
+{
+  ".url": {
+    "FnOffice.settings": {
+      "title": "FnOffice", "icon": "images/icon_{0}.png", "type": "iframe", "protocol": "",
+      "gatewayPrefix": "/app/FnOffice", "gatewaySocket": "app.sock", "url": "/app/FnOffice", "allUsers": false
+    },
+    "FnOffice.editor": {
+      "title": "Office", "icon": "images/icon_{0}.png", "type": "iframe", "protocol": "",
+      "gatewayPrefix": "/app/FnOffice", "gatewaySocket": "app.sock", "url": "/app/FnOffice/open", "allUsers": true,
+      "fileTypes": ["doc","docx","docm","dot","dotx","odt","rtf","pdf","xls","xlsx","xlsm","xlt","xltx","ods","csv","ppt","pptx","pptm","pot","potx","odp"],
+      "noDisplay": true
+    }
+  }
+}

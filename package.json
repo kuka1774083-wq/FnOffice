@@ -1,0 +1,1 @@
+{"name":"fnoffice","version":"0.1.0","private":true,"type":"module","scripts":{"start":"node app/server/index.mjs","check":"node --check app/server/index.mjs"},"engines":{"node":">=20"}}

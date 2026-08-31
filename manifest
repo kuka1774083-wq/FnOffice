@@ -1,0 +1,18 @@
+appname=FnOffice
+version=0.4.73
+display_name=FnOffice
+desc=飞牛 fnOS Office 文件编辑集成，支持 OnlyOffice 在线协作。
+source=thirdparty
+platform=all
+maintainer=OnlyOffice
+maintainer_url=https://www.onlyoffice.com/
+distributor=MEMUZE
+distributor_url=https://space.bilibili.com/41158746?spm_id_from=333.1007.0.0
+os_min_version=1.2.0401
+desktop_uidir=ui
+desktop_applaunchname=FnOffice.settings
+ctl_stop=true
+checkport=false
+disable_authorization_path=false
+micro_app=true
+install_dep_apps=nodejs_v22

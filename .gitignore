@@ -1,0 +1,8 @@
+etc/*
+var/*
+tmp/*
+app/docker/.env
+app/docker/onlyoffice/
+app.sock
+.devtest/
+*.fpk

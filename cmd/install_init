@@ -1,0 +1,9 @@
+#!/bin/sh
+
+# The install-init hook runs before fnOS has guaranteed that all package
+# directories/environment variables are available.  Do not use `set -u` or
+# depend on TRIM_PKGTMP (it is not a documented fnOS variable) here: either
+# can make an otherwise valid package fail before the installer reaches the
+# wizard.  Persistent directories are created by install_callback, after the
+# package paths have been initialized.
+exit 0

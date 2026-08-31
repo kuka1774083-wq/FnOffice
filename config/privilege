@@ -1,0 +1,6 @@
+{
+  "defaults": { "run-as": "root" },
+  "username": "fnoffice_user",
+  "groupname": "fnoffice_group",
+  "join-groups": ["docker"]
+}

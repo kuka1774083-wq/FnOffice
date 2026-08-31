@@ -1,0 +1,422 @@
+#!/bin/sh
+set -eu
+error_file="${TRIM_TEMP_LOGFILE:-/tmp/fnoffice-install.log}"
+# fnOS exposes wizard fields using their exact `field` names.  Keep aliases
+# for older installer builds and for upgrades that used unprefixed names.
+wizard_port="${wizard_onlyoffice_port:-${TRIM_WIZARD_ONLYOFFICE_PORT:-${onlyoffice_port:-${TRIM_ONLYOFFICE_PORT:-${ONLYOFFICE_PORT:-}}}}}"
+port="${wizard_port:-18081}"
+onlyoffice_image="${wizard_onlyoffice_image:-${TRIM_WIZARD_ONLYOFFICE_IMAGE:-${ONLYOFFICE_IMAGE:-docker.m.daocloud.io/onlyoffice/documentserver:latest}}}"
+callback_image="${wizard_callback_image:-${TRIM_WIZARD_CALLBACK_IMAGE:-${CALLBACK_IMAGE:-docker.m.daocloud.io/nginx:alpine}}}"
+app_dest="${TRIM_APPDEST:-/var/apps/FnOffice/target}"
+# Lifecycle hooks invoked during an upgrade do not consistently receive the
+# TRIM_PKG* variables on every fnOS version.  Resolve the persistent app
+# configuration beside the app centre target in that case; never fall back to
+# a transient path and accidentally generate a different JWT secret.
+pkg_etc="${TRIM_PKGETC:-}"
+if [ -z "$pkg_etc" ]; then
+  app_volume="$(dirname "$(dirname "$app_dest")")"
+  discovered_etc="$app_volume/@appconf/FnOffice"
+  if [ -d "$discovered_etc" ]; then
+    pkg_etc="$discovered_etc"
+  else
+    pkg_etc="/var/apps/FnOffice/etc"
+  fi
+fi
+pkg_var="${TRIM_PKGVAR:-/var/apps/FnOffice/var}"
+pkg_tmp="${TRIM_PKGTMP:-/var/apps/FnOffice/tmp}"
+mkdir -p "$pkg_etc" "$pkg_var" "$pkg_tmp" 2>/dev/null || true
+active_pid=""
+cancel_file="${TRIM_INSTALL_CANCEL_FILE:-${TRIM_CANCEL_FILE:-$pkg_tmp/.install-cancel}}"
+rm -f "$cancel_file" 2>/dev/null || true
+cancel_install() {
+  trap - INT TERM HUP
+  echo "FnOffice 安装已取消" > "$error_file" 2>/dev/null || true
+  : > "$cancel_file" 2>/dev/null || true
+  if [ -n "$active_pid" ]; then
+    kill "$active_pid" 2>/dev/null || true
+    wait "$active_pid" 2>/dev/null || true
+    active_pid=""
+  fi
+  if command -v docker >/dev/null 2>&1; then
+    if command -v timeout >/dev/null 2>&1; then
+      timeout 20 docker rm -f fnoffice-callback-relay fnoffice-onlyoffice >/dev/null 2>&1 || true
+    else
+      docker rm -f fnoffice-callback-relay fnoffice-onlyoffice >/dev/null 2>&1 || true
+    fi
+  fi
+  exit 130
+}
+trap cancel_install INT TERM HUP
+if [ -z "${wizard_onlyoffice_image:-}" ] && [ -f "$pkg_etc/config.json" ]; then
+  saved_image="$(sed -n 's/.*"onlyOfficeImage"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$pkg_etc/config.json" | head -1)"
+  [ -z "$saved_image" ] || onlyoffice_image="$saved_image"
+fi
+if [ -z "${wizard_callback_image:-}" ] && [ -f "$pkg_etc/config.json" ]; then
+  saved_callback_image="$(sed -n 's/.*"callbackImage"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$pkg_etc/config.json" | head -1)"
+  [ -z "$saved_callback_image" ] || callback_image="$saved_callback_image"
+fi
+# Versions through 0.4.25 used a raw socat relay. Migrate its image to nginx,
+# which is HTTP-aware and preserves Document Server response framing.
+case "$callback_image" in *alpine/socat*) callback_image="docker.m.daocloud.io/nginx:alpine";; esac
+if [ -z "$wizard_port" ] && [ -f "$pkg_etc/config.json" ]; then
+  saved_port="$(sed -n 's/.*"onlyOfficePort"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$pkg_etc/config.json" | head -1)"
+  [ -z "$saved_port" ] || port="$saved_port"
+fi
+case "$port" in *[!0-9]*|'') echo "OnlyOffice 内部端口无效" > "$error_file"; exit 1;; esac
+if [ "$port" -lt 1024 ] || [ "$port" -gt 65535 ]; then echo "OnlyOffice 内部端口必须在 1024-65535 之间" > "$error_file"; exit 1; fi
+case "$onlyoffice_image" in *[!A-Za-z0-9._:/-]*|'') echo "OnlyOffice 镜像地址无效" > "$error_file"; exit 1;; esac
+case "$callback_image" in *[!A-Za-z0-9._:/-]*|'') echo "回调中继镜像地址无效" > "$error_file"; exit 1;; esac
+# Upgrades re-create FnOffice's own OnlyOffice container.  Its currently
+# published port is therefore expected to be occupied and must not block the
+# upgrade before that old container is replaced.
+owns_requested_port=false
+if command -v docker >/dev/null 2>&1; then
+  docker port fnoffice-onlyoffice 80/tcp 2>/dev/null | grep -Eq "[:.]$port$" && owns_requested_port=true || true
+fi
+if [ "$owns_requested_port" != "true" ]; then
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn "sport = :$port" | grep -q LISTEN && { echo "端口 $port 已被占用；该端口仅供内部使用，请改填未使用端口" > "$error_file"; exit 1; }
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -ltn 2>/dev/null | grep -Eq "[:.]$port[[:space:]]" && { echo "端口 $port 已被占用；该端口仅供内部使用，请改填未使用端口" > "$error_file"; exit 1; }
+  fi
+fi
+secret="${wizard_onlyoffice_jwt_secret:-${TRIM_WIZARD_ONLYOFFICE_JWT_SECRET:-${onlyoffice_jwt_secret:-${TRIM_ONLYOFFICE_JWT_SECRET:-}}}}"
+# A blank secret during an update/configuration callback means "keep the
+# existing generated secret", not "replace it".  Replacing it only in the
+# container makes every editor session fail Document Server JWT validation.
+if [ -z "$secret" ] && [ -f "$pkg_etc/config.json" ]; then
+  saved_secret="$(sed -n 's/.*"jwtSecret"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$pkg_etc/config.json" | head -1)"
+  [ -z "$saved_secret" ] || secret="$saved_secret"
+fi
+if [ -z "$secret" ]; then secret="$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')"; fi
+# Preserve collaboration limits saved from the settings page.  Earlier
+# releases rewrote these fields to 10 / 3 on every application update,
+# which made an administrator's saved values appear to revert.
+max_global_documents=50
+max_user_documents=10
+if [ -f "$pkg_etc/config.json" ]; then
+  saved_max_global_documents="$(sed -n 's/.*"maxGlobalDocuments"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$pkg_etc/config.json" | head -1)"
+  saved_max_user_documents="$(sed -n 's/.*"maxUserDocuments"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$pkg_etc/config.json" | head -1)"
+  saved_concurrency_defaults_version="$(sed -n 's/.*"concurrencyDefaultsVersion"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$pkg_etc/config.json" | head -1)"
+  case "$saved_max_global_documents" in ''|*[!0-9]*) ;; *) max_global_documents="$saved_max_global_documents";; esac
+  case "$saved_max_user_documents" in ''|*[!0-9]*) ;; *) max_user_documents="$saved_max_user_documents";; esac
+  # No marker means the pair came from the old application default.
+  if [ -z "$saved_concurrency_defaults_version" ] && [ "$max_global_documents" = 10 ] && [ "$max_user_documents" = 3 ]; then
+    max_global_documents=50
+    max_user_documents=10
+  fi
+fi
+# fnOS has used both lower-case wizard variables and TRIM_WIZARD_* names in
+# different installer builds. Preserve an existing choice during upgrades so
+# an update without wizard values cannot silently turn OnlyOffice off.
+wizardFlag="${wizard_install_onlyoffice:-${TRIM_WIZARD_INSTALL_ONLYOFFICE:-${install_onlyoffice:-${TRIM_INSTALL_ONLYOFFICE:-${FNOFFICE_INSTALL_ONLYOFFICE:-}}}}}"
+installMode="${wizard_onlyoffice_install_mode:-${TRIM_WIZARD_ONLYOFFICE_INSTALL_MODE:-}}"
+case "$(printf '%s' "$installMode" | tr '[:upper:]' '[:lower:]')" in
+  automatic|auto|docker|true|1|yes|on|enabled) wizardFlag=true ;;
+  manual|none|false|0|no|off|disabled) wizardFlag=false ;;
+esac
+# Some fnOS releases normalize custom fields differently when invoking hooks.
+# Recover values by name from the exported environment before falling back to
+# defaults; only names are inspected, never secrets.
+if [ -z "$wizardFlag" ]; then
+  wizardFlag="$(env | awk -F= 'tolower($1) ~ /install.*onlyoffice|onlyoffice.*install/ {print $2; exit}')"
+fi
+if [ -z "$port" ] || [ "$port" = "18081" ]; then
+  env_port="$(env | awk -F= 'tolower($1) ~ /onlyoffice.*port|port.*onlyoffice/ {print $2; exit}')"
+  [ -z "$env_port" ] || port="$env_port"
+fi
+if [ -z "$wizardFlag" ] && [ -f "$pkg_etc/config.json" ]; then
+  wizardFlag="$(sed -n 's/.*"installOnlyOffice"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p' "$pkg_etc/config.json" | head -1)"
+fi
+installFlag="${wizardFlag:-false}"
+installFlag="$(printf '%s' "$installFlag" | tr '[:upper:]' '[:lower:]')"
+case "$installFlag" in true|1|yes|on|enabled) installFlag=true;; *) installFlag=false;; esac
+
+wizard_url="${wizard_onlyoffice_url:-${TRIM_WIZARD_ONLYOFFICE_URL:-${onlyoffice_url:-${TRIM_ONLYOFFICE_URL:-}}}}"
+if [ "$installFlag" = "true" ]; then
+  onlyoffice_url="http://127.0.0.1:$port"
+elif [ -n "$wizard_url" ]; then
+  onlyoffice_url="$wizard_url"
+elif [ -f "$pkg_etc/config.json" ]; then
+  onlyoffice_url="$(sed -n 's/.*"onlyOfficeUrl"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$pkg_etc/config.json" | head -1)"
+fi
+onlyoffice_url="${onlyoffice_url:-http://127.0.0.1:$port}"
+case "$onlyoffice_url" in http://*|https://*) ;; *) echo "OnlyOffice 地址无效，请填写 http:// 或 https:// 地址" > "$error_file"; exit 1;; esac
+if ! printf '%s' "$onlyoffice_url" | grep -Eq '^https?://[^[:space:]\"]+$'; then
+  echo "OnlyOffice 地址包含无效字符" > "$error_file"
+  exit 1
+fi
+
+# The wizard checkbox controls whether mobile requests use OnlyOffice's mobile
+# editor.  Preserve the saved value during upgrades when the field is omitted.
+wizard_mobile="${wizard_distinguish_mobile:-${TRIM_WIZARD_DISTINGUISH_MOBILE:-${distinguish_mobile:-${TRIM_DISTINGUISH_MOBILE:-}}}}"
+if [ -z "$wizard_mobile" ] && [ -f "$pkg_etc/config.json" ]; then
+  wizard_mobile="$(sed -n 's/.*"distinguishMobile"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p' "$pkg_etc/config.json" | head -1)"
+fi
+mobileFlag="$(printf '%s' "${wizard_mobile:-false}" | tr '[:upper:]' '[:lower:]')"
+case "$mobileFlag" in true|1|yes|on|enabled) mobileFlag=true;; *) mobileFlag=false;; esac
+
+# Keep a small, non-sensitive trace when the hook runs. This makes it
+# possible to distinguish a missing wizard value from a Docker failure.
+diagnostic_file="${pkg_tmp}/install-diagnostics.log"
+{
+  echo "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "wizard_port_present=$([ -n "${wizard_port}" ] && echo yes || echo no)"
+  echo "wizard_install_onlyoffice_present=$([ -n "${wizardFlag}" ] && echo yes || echo no)"
+  echo "wizard_install_mode_present=$([ -n "${installMode}" ] && echo yes || echo no)"
+  echo "installOnlyOffice=$installFlag"
+  echo "distinguishMobile=$mobileFlag"
+  echo "onlyOfficePort=$port"
+  echo "docker_present=$(command -v docker >/dev/null 2>&1 && echo yes || echo no)"
+  echo "docker_access=$(docker version >/dev/null 2>&1 && echo yes || echo no)"
+} > "$diagnostic_file" 2>/dev/null || true
+chmod 600 "$diagnostic_file" 2>/dev/null || true
+compose_dir="$app_dest/app/docker"
+[ -d "$compose_dir" ] || compose_dir="$app_dest/docker"
+cat > "$pkg_etc/config.json" <<EOF
+{"installOnlyOffice":$installFlag,"onlyOfficePort":$port,"onlyOfficeUrl":"$onlyoffice_url","distinguishMobile":$mobileFlag,"onlyOfficeImage":"$onlyoffice_image","callbackImage":"$callback_image","internalCallbackBaseUrl":"http://callback-relay:9000","useInternalCallbackRelay":true,"jwtSecret":"$secret","jwtHeader":"Authorization","jwtInBody":false,"editorLanguage":"zh-CN","coEditingMode":"fast","forceSave":true,"maxGlobalDocuments":$max_global_documents,"maxUserDocuments":$max_user_documents,"concurrencyDefaultsVersion":2,"sessionTtlMinutes":30,"verifyTls":true}
+EOF
+chmod 600 "$pkg_etc/config.json"
+mkdir -p "$compose_dir"
+cat > "$compose_dir/.env" <<EOF
+ONLYOFFICE_PORT=$port
+ONLYOFFICE_IMAGE=$onlyoffice_image
+CALLBACK_IMAGE=$callback_image
+JWT_SECRET=$secret
+FNOFFICE_APPDEST=$app_dest
+EOF
+chmod 600 "$compose_dir/.env"
+if [ "$installFlag" = "false" ]; then
+  # Manual mode deliberately leaves Docker alone. FnOffice does not create a
+  # Compose project or stop a user-managed OnlyOffice deployment.
+  exit 0
+else
+  # Automatic mode creates regular Docker containers instead of a Compose
+  # project. This keeps the Docker UI free of an unexpected project and avoids
+  # Compose lifecycle operations changing a user's project habits.
+  if command -v docker >/dev/null 2>&1; then
+    network_name="fnoffice-internal"
+    onlyoffice_name="fnoffice-onlyoffice"
+    relay_name="fnoffice-callback-relay"
+    data_dir="$compose_dir/onlyoffice"
+    mkdir -p "$data_dir/logs" "$data_dir/data" "$data_dir/lib" "$data_dir/bridge"
+    image_log="$pkg_tmp/onlyoffice-image-pull.log"
+    selected_image=""
+    pull_timeout="${FNOFFICE_PULL_TIMEOUT:-600}"
+    pull_image() {
+      image="$1"
+      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] pulling $image (timeout=${pull_timeout}s)" >> "$image_log"
+      if command -v timeout >/dev/null 2>&1; then
+        timeout "$pull_timeout" docker pull "$image" >>"$image_log" 2>&1 &
+      else
+        docker pull "$image" >>"$image_log" 2>&1 &
+      fi
+      active_pid="$!"
+      if wait "$active_pid"; then rc=0; else rc="$?"; fi
+      active_pid=""
+      return "$rc"
+    }
+    for candidate in "$onlyoffice_image" docker.m.daocloud.io/onlyoffice/documentserver:latest dockerproxy.net/onlyoffice/documentserver:latest onlyoffice/documentserver:latest; do
+      if docker image inspect "$candidate" >/dev/null 2>&1; then
+        selected_image="$candidate"
+        break
+      fi
+    done
+    if [ -z "$selected_image" ]; then
+      for candidate in "$onlyoffice_image" dockerproxy.net/onlyoffice/documentserver:latest onlyoffice/documentserver:latest; do
+        if pull_image "$candidate"; then
+          selected_image="$candidate"
+          break
+        fi
+      done
+    fi
+    if [ -z "$selected_image" ]; then
+      echo "OnlyOffice 镜像拉取失败，请检查网络或在飞牛 Docker 中先手动拉取镜像；详见 $image_log" > "$error_file"
+      exit 1
+    fi
+    onlyoffice_image="$selected_image"
+    if ! docker image inspect "$callback_image" >/dev/null 2>&1; then
+      pull_image "$callback_image" || {
+        echo "回调中继镜像拉取失败，请在设置中更换镜像地址；详见 $image_log" > "$error_file"
+        exit 1
+      }
+    fi
+
+    # Migrate only containers owned by the legacy FnOffice Compose project.
+    # Never inspect or change unrelated user containers.
+    legacy_ids="$(docker ps -aq --filter label=com.docker.compose.project=fnoffice-onlyoffice 2>/dev/null || true)"
+    [ -z "$legacy_ids" ] || docker rm -f $legacy_ids >/dev/null 2>&1 || true
+    docker rm -f "$onlyoffice_name" "$relay_name" >/dev/null 2>&1 || true
+    # Do not use Docker's `internal` network here: on some fnOS Docker
+    # versions it prevents published host ports from being installed even
+    # though the UI still displays the mapping. The network has no published
+    # ports for the relay; OnlyOffice exposure is controlled solely by the
+    # explicit -p mapping below.
+    existing_internal="$(docker network inspect -f '{{.Internal}}' "$network_name" 2>/dev/null || true)"
+    if [ "$existing_internal" = "true" ]; then
+      docker network rm "$network_name" >/dev/null 2>&1 || {
+        echo "FnOffice 网络仍为 internal 且无法重建，请在飞牛 Docker 中删除网络 $network_name 后重试" > "$error_file"
+        exit 1
+      }
+    fi
+    docker network inspect "$network_name" >/dev/null 2>&1 || docker network create "$network_name" >/dev/null
+
+    container_id=""
+    container_create_log="$pkg_tmp/onlyoffice-container-create.log"
+    if ! container_id="$(docker run -d --name "$onlyoffice_name" --restart always --network "$network_name" \
+      -p "$port:80" \
+      -e JWT_ENABLED=true -e JWT_SECRET="$secret" -e JWT_HEADER=Authorization -e JWT_IN_BODY=false \
+      -e ALLOW_PRIVATE_IP_ADDRESS=true \
+      -v "$data_dir/logs:/var/log/onlyoffice" \
+      -v "$data_dir/data:/var/www/onlyoffice/Data" \
+      -v "$data_dir/lib:/var/lib/onlyoffice" \
+      "$onlyoffice_image" 2>"$container_create_log")"; then
+      echo "OnlyOffice Docker 创建失败，详见 $container_create_log" > "$error_file"
+      exit 1
+    fi
+    echo "onlyoffice_container_id=$container_id" >> "$diagnostic_file"
+    relay_conf="$compose_dir/callback-relay.nginx.conf"
+    cat > "$relay_conf" <<'EOF'
+server {
+  listen 9000;
+  client_max_body_size 0;
+  location /fnoffice-files/ {
+    alias /srv/fnoffice-files/;
+    types {
+      application/msword                         doc;
+      application/vnd.openxmlformats-officedocument.wordprocessingml.document docx;
+      application/vnd.ms-word.document.macroEnabled.12 docm;
+      application/vnd.ms-excel                    xls;
+      application/vnd.openxmlformats-officedocument.spreadsheetml.sheet xlsx;
+      application/vnd.ms-excel.sheet.macroEnabled.12 xlsm;
+      application/vnd.ms-powerpoint                ppt;
+      application/vnd.openxmlformats-officedocument.presentationml.presentation pptx;
+      application/vnd.ms-powerpoint.presentation.macroEnabled.12 pptm;
+      application/pdf                              pdf;
+    }
+    default_type application/octet-stream;
+    add_header Content-Disposition "inline; filename=\"source.docx\"" always;
+    add_header Cache-Control "no-store";
+    add_header Accept-Ranges "bytes" always;
+    add_header X-Content-Type-Options "nosniff" always;
+  }
+  location / {
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header Connection "";
+    proxy_set_header Accept-Encoding "";
+    proxy_request_buffering off;
+    proxy_buffering off;
+    proxy_pass http://unix:/run/fnoffice/app.sock:/;
+  }
+}
+EOF
+    if ! docker run -d --name "$relay_name" --restart always --network "$network_name" --network-alias callback-relay \
+      -v "$app_dest:/run/fnoffice:ro" \
+      -v "$data_dir/bridge:/srv/fnoffice-files:ro" \
+      -v "$relay_conf:/etc/nginx/conf.d/default.conf:ro" \
+      "$callback_image" >/dev/null; then
+      docker rm -f "$onlyoffice_name" >/dev/null 2>&1 || true
+      echo "OnlyOffice 回调容器启动失败，请检查 Docker 服务" > "$error_file"
+      exit 1
+    fi
+    # Do not report installation complete until the DocumentServer endpoint
+    # is actually ready. This is intentionally synchronous at the user's
+    # request; the installer may remain at a high percentage while the image
+    # initializes. A failed readiness check removes only the two owned
+    # containers so a retry starts cleanly.
+    ready=false
+    docservice_ready=false
+    i=0
+    missing_count=0
+    port_missing_count=0
+    health_timeout="${FNOFFICE_HEALTH_TIMEOUT:-1200}"
+    health_log="$pkg_tmp/onlyoffice-container.log"
+    : > "$health_log" 2>/dev/null || true
+    while [ "$i" -lt "$health_timeout" ]; do
+      # fnOS normally interrupts this hook with TERM when the user presses
+      # Cancel. Some releases expose a cancellation marker instead; honor it
+      # too so a stuck Docker operation can be cancelled without waiting for
+      # its network timeout.
+      if [ -f "$cancel_file" ] || [ "${TRIM_CANCEL:-}" = "1" ] || [ "${TRIM_INSTALL_CANCEL:-}" = "1" ]; then
+        cancel_install
+      fi
+      state="$(docker inspect -f '{{.State.Status}}' "$onlyoffice_name" 2>/dev/null || true)"
+      if [ -z "$state" ]; then
+        missing_count=$((missing_count + 1))
+        echo "OnlyOffice inspect unavailable (${missing_count}/3)" >> "$diagnostic_file"
+        if [ "$missing_count" -ge 3 ]; then
+          docker logs --tail 120 "$onlyoffice_name" >> "$health_log" 2>&1 || true
+          echo "无法读取 OnlyOffice 容器状态，Docker 容器可能已被移除或 Docker 服务异常。详见 $health_log" > "$error_file"
+          exit 1
+        fi
+      else
+        missing_count=0
+      fi
+      if [ "$state" = "exited" ] || [ "$state" = "dead" ]; then
+        docker logs --tail 120 "$onlyoffice_name" >> "$health_log" 2>&1 || true
+        docker rm -f "$relay_name" "$onlyoffice_name" >/dev/null 2>&1 || true
+        echo "OnlyOffice 容器已退出，详见 $health_log" > "$error_file"
+        exit 1
+      fi
+      # Verify that Docker really published the requested host port.  Some
+      # fnOS Docker versions report a mapping in the UI even when the
+      # userland proxy/NAT rule has not been installed yet.
+      published="$(docker port "$onlyoffice_name" 80/tcp 2>/dev/null || true)"
+      if [ -z "$published" ]; then
+        published="$(docker inspect -f '{{range $p, $bindings := .NetworkSettings.Ports}}{{if eq $p "80/tcp"}}{{range $bindings}}{{.HostIp}}:{{.HostPort}} {{end}}{{end}}{{end}}' "$onlyoffice_name" 2>/dev/null || true)"
+      fi
+      port_ok=false
+      printf '%s' "$published" | grep -Eq "127\\.0\\.0\\.1:$port|0\\.0\\.0\\.0:$port|:::${port}" && port_ok=true
+      internal_code=""
+      # Check the service from inside the container as well.  This separates
+      # DocumentServer initialization delays from a missing host port mapping.
+      if [ "$state" = "running" ]; then
+        if command -v docker >/dev/null 2>&1; then
+          if docker exec "$onlyoffice_name" sh -c 'command -v curl >/dev/null 2>&1 && curl -sS -m 3 -o /dev/null -w "%{http_code}" http://127.0.0.1/healthcheck || (command -v wget >/dev/null 2>&1 && wget -q -T 3 -O /dev/null http://127.0.0.1/healthcheck && echo 200 || true)' >/tmp/fnoffice-health-code 2>/dev/null; then
+            internal_code="$(cat /tmp/fnoffice-health-code 2>/dev/null || true)"
+          fi
+        fi
+      fi
+      if [ "$state" = "running" ]; then
+        # nginx's healthcheck becomes available before the Socket.IO document
+        # service.  Wait for port 8000 too so documents are usable as soon as
+        # fnOS marks the installation complete.
+        docker exec "$onlyoffice_name" sh -c 'command -v curl >/dev/null 2>&1 && curl -sS -m 3 -o /dev/null http://127.0.0.1:8000/healthcheck' >/dev/null 2>&1 && docservice_ready=true || docservice_ready=false
+      fi
+      if command -v curl >/dev/null 2>&1; then
+        code="$(curl --max-time 3 -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/healthcheck" 2>/dev/null || true)"
+        [ "$code" = "200" ] && [ "$port_ok" = "true" ] && [ "$docservice_ready" = "true" ] && { ready=true; break; }
+      elif command -v wget >/dev/null 2>&1; then
+        wget -q -T 3 -O /dev/null "http://127.0.0.1:$port/healthcheck" && [ "$port_ok" = "true" ] && [ "$docservice_ready" = "true" ] && { ready=true; break; }
+      fi
+      if [ "$state" = "running" ] && [ "$internal_code" = "200" ] && [ "$port_ok" != "true" ]; then
+        port_missing_count=$((port_missing_count + 1))
+        if [ "$port_missing_count" -ge 3 ]; then
+          docker logs --tail 120 "$onlyoffice_name" >> "$health_log" 2>&1 || true
+          echo "OnlyOffice 容器内部已就绪，但 Docker 未发布宿主机端口 $port；请检查 Docker 网络/端口映射。详见 $health_log" > "$error_file"
+          exit 1
+        fi
+      else
+        port_missing_count=0
+      fi
+      echo "OnlyOffice healthcheck pending (${i}/${health_timeout}s, status=${state:-unknown}, published=${published:-none}, host_http=${code:-n/a}, internal_http=${internal_code:-n/a}, docservice=${docservice_ready})" >> "$diagnostic_file"
+      if [ $((i % 30)) -eq 0 ]; then
+        docker logs --tail 40 "$onlyoffice_name" >> "$health_log" 2>&1 || true
+      fi
+      sleep 10
+      i=$((i + 10))
+    done
+    if [ "$ready" != "true" ]; then
+      # Keep both containers for inspection/retry. Removing them here made a
+      # slow first initialization look like a failed image deployment.
+      docker logs --tail 120 "$onlyoffice_name" >> "$health_log" 2>&1 || true
+      echo "OnlyOffice 容器未在 ${health_timeout} 秒内就绪；容器已保留，请在飞牛 Docker 中等待其完成初始化后再次尝试安装。详见 $health_log" > "$error_file"
+      exit 1
+    fi
+    echo "OnlyOffice healthcheck ready after ${i}s" >> "$diagnostic_file"
+  else
+    echo "已选择自动安装 OnlyOffice，但系统未找到 docker 命令" > "$error_file"
+    exit 1
+  fi
+fi

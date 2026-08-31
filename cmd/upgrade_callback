@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+# Upgrades do not show the install wizard again.  If the persisted setting
+# requests automatic OnlyOffice, replay the same lifecycle hook so a package
+# update can create or repair the containers without user shell access.
+app_dest="${TRIM_APPDEST:-/var/apps/FnOffice/target}"
+etc_dir="${TRIM_PKGETC:-}"
+if [ -z "$etc_dir" ]; then
+  app_volume="$(dirname "$(dirname "$app_dest")")"
+  discovered_etc="$app_volume/@appconf/FnOffice"
+  if [ -d "$discovered_etc" ]; then
+    etc_dir="$discovered_etc"
+  else
+    etc_dir="/var/apps/FnOffice/etc"
+  fi
+fi
+config_file="$etc_dir/config.json"
+if [ -f "$config_file" ]; then
+  enabled="$(sed -n 's/.*"installOnlyOffice"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p' "$config_file" | head -1)"
+  if [ "$enabled" = "true" ]; then
+    port="$(sed -n 's/.*"onlyOfficePort"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$config_file" | head -1)"
+    secret="$(sed -n 's/.*"jwtSecret"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$config_file" | head -1)"
+    export wizard_install_onlyoffice=true
+    export wizard_onlyoffice_port="${port:-18081}"
+    export wizard_onlyoffice_jwt_secret="$secret"
+    script="$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd)/install_callback"
+    [ -x "$script" ] || script="${TRIM_APPDEST:-/var/apps/FnOffice/target}/cmd/install_callback"
+    [ -x "$script" ] && "$script" || true
+  fi
+fi
+exit 0

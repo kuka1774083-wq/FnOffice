@@ -1,0 +1,135 @@
+#!/bin/sh
+
+node_runtime="/var/apps/nodejs_v22/target/bin"
+node_bin="$node_runtime/node"
+if [ ! -x "$node_bin" ]; then
+  node_bin="$(command -v node 2>/dev/null || true)"
+fi
+
+# @apphome is persistent across restarts/upgrades and is the primary location
+# for real application diagnostics.  Keep PID state in @apphome as well.
+home_dir="${TRIM_PKGHOME:-/var/apps/FnOffice/home}"
+log_file="$home_dir/logs/fnoffice.log"
+pid_file="$home_dir/fnoffice.pid"
+app_dest="${TRIM_APPDEST:-/var/apps/FnOffice/target}"
+if ! mkdir -p "$home_dir/logs" 2>/dev/null; then
+  home_dir="${TRIM_PKGVAR:-/tmp}/fnoffice"
+  log_file="$home_dir/logs/fnoffice.log"
+  pid_file="$home_dir/fnoffice.pid"
+  mkdir -p "$home_dir/logs" 2>/dev/null || true
+fi
+if ! touch "$log_file" 2>/dev/null; then
+  home_dir="${TRIM_PKGVAR:-/tmp}/fnoffice"
+  log_file="$home_dir/logs/fnoffice.log"
+  pid_file="$home_dir/fnoffice.pid"
+  mkdir -p "$home_dir/logs" 2>/dev/null || true
+  touch "$log_file" 2>/dev/null || true
+fi
+
+# The fnOS lifecycle runner may provide these values only to the hook shell.
+# Export the resolved paths so the Node process uses the same package layout
+# instead of falling back to its current working directory (often /).
+export TRIM_APPDEST="$app_dest"
+export TRIM_PKGHOME="$home_dir"
+# fnOS may omit these variables on a status probe. Keep the runtime on the
+# same persistent configuration written by the installation callback.
+volume_root="$(dirname "$(dirname "$app_dest")")"
+app_name="$(basename "$app_dest")"
+export TRIM_PKGETC="${TRIM_PKGETC:-$volume_root/@appconf/$app_name}"
+export TRIM_PKGVAR="${TRIM_PKGVAR:-$volume_root/@appdata/$app_name}"
+export TRIM_PKGTMP="${TRIM_PKGTMP:-/var/apps/FnOffice/tmp}"
+export FNOFFICE_SOCKET="${FNOFFICE_SOCKET:-$app_dest/app.sock}"
+printf '[%s] bootstrap app_dest=%s node=%s socket=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$app_dest" "$node_bin" "$FNOFFICE_SOCKET" >> "$log_file"
+
+is_running() {
+  [ -r "$pid_file" ] || return 1
+  pid="$(tr -d '[:space:]' < "$pid_file")"
+  [ -n "$pid" ] || return 1
+  # The lifecycle hook can run as a different user than the root-owned
+  # service process. `kill -0` returns EPERM in that case even though the
+  # process is alive, which previously made fnOS restart FnOffice on every
+  # periodic status probe and broke active OnlyOffice sessions. Reading the
+  # proc command line is sufficient and does not require signalling it.
+  [ -r "/proc/$pid/cmdline" ] || return 1
+  cmdline="$(tr '\000' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+  printf '%s' "$cmdline" | grep -q 'server/index.mjs'
+}
+
+start_process() {
+  # Status/start callbacks can arrive concurrently. Never create a second
+  # server when the recorded process is already alive.
+  if is_running; then
+    return 0
+  fi
+  # Always start from a clean state. A stale PID or socket can otherwise make
+  # fnOS believe the service is running while the gateway has nothing to use.
+  if [ -r "$pid_file" ]; then
+    old_pid="$(tr -d '[:space:]' < "$pid_file")"
+    [ -z "$old_pid" ] || kill "$old_pid" 2>/dev/null || true
+  fi
+  rm -f "$pid_file"
+  rm -f "$app_dest/app.sock"
+  printf '\n[%s] starting FnOffice\n' "$(date '+%Y-%m-%d %H:%M:%S')" >> "$log_file"
+  if [ -z "$node_bin" ] || [ ! -x "$node_bin" ]; then
+    echo "node runtime not found; expected $node_runtime/node" >> "$log_file"
+    error_file="${TRIM_TEMP_LOGFILE:-$log_file}"
+    echo "FnOffice 找不到 Node.js 运行时，详细日志：$log_file" > "$error_file"
+    exit 1
+  fi
+  app_entry="$app_dest/server/index.mjs"
+  if [ ! -f "$app_entry" ]; then
+    app_entry="$app_dest/app/server/index.mjs"
+  fi
+  if [ ! -f "$app_entry" ]; then
+    echo "server entry not found under $app_dest" >> "$log_file"
+    error_file="${TRIM_TEMP_LOGFILE:-$log_file}"
+    echo "FnOffice 找不到 server/index.mjs，详细日志：$log_file" > "$error_file"
+    exit 1
+  fi
+  # nohup keeps the child alive after fnOS returns from this lifecycle hook.
+  if command -v nohup >/dev/null 2>&1; then
+    nohup "$node_bin" "$app_entry" >> "$log_file" 2>&1 &
+  else
+    "$node_bin" "$app_entry" >> "$log_file" 2>&1 &
+  fi
+  pid="$!"
+  printf '%s\n' "$pid" > "$pid_file"
+  sleep 1
+  if ! kill -0 "$pid" 2>/dev/null; then
+    error_file="${TRIM_TEMP_LOGFILE:-$log_file}"
+    echo "FnOffice 后端启动失败，详细日志：$log_file" > "$error_file"
+    rm -f "$pid_file"
+    exit 1
+  fi
+}
+
+stop_process() {
+  if is_running; then
+    pid="$(tr -d '[:space:]' < "$pid_file")"
+    kill "$pid" 2>/dev/null || true
+    i=0
+    while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 10 ]; do
+      sleep 1
+      i=$((i + 1))
+    done
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+  rm -f "$pid_file" "$app_dest/app.sock"
+}
+
+case "${1:-}" in
+  start) start_process ;;
+  stop) stop_process ;;
+  status)
+    if is_running; then
+      exit 0
+    fi
+    # Some fnOS gateway-managed apps are probed through status immediately
+    # after enable and may not receive a separate start callback. Self-heal
+    # by starting the service, then report its actual state.
+    start_process
+    is_running && exit 0 || exit 3
+    ;;
+  run|restart|"") start_process ;;
+  *) start_process ;;
+esac

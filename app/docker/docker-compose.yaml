@@ -1,0 +1,55 @@
+services:
+  onlyoffice:
+    image: ${ONLYOFFICE_IMAGE:-docker.m.daocloud.io/onlyoffice/documentserver:latest}
+    restart: always
+    ports:
+      # Defaults keep the project valid if fnOS parses it before install_callback
+      # has written the generated .env file. The callback then replaces these
+      # values with the wizard configuration and recreates the project.
+      - "${ONLYOFFICE_PORT:-18081}:80"
+    environment:
+      JWT_ENABLED: "true"
+      JWT_SECRET: "${JWT_SECRET:-fnos-bootstrap-secret}"
+      JWT_HEADER: "Authorization"
+      JWT_IN_BODY: "false"
+      # FnOffice's secure file relay is on the Docker bridge network.
+      # Document Server must be allowed to fetch that private address.
+      ALLOW_PRIVATE_IP_ADDRESS: "true"
+    volumes:
+      - ./onlyoffice/logs:/var/log/onlyoffice
+      - ./onlyoffice/data:/var/www/onlyoffice/Data
+      - ./onlyoffice/lib:/var/lib/onlyoffice
+    networks: [onlyoffice_internal]
+  callback-relay:
+    image: ${CALLBACK_IMAGE:-docker.m.daocloud.io/nginx:alpine}
+    restart: always
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        cat >/etc/nginx/conf.d/default.conf <<'EOF'
+        server {
+          listen 9000;
+          location /fnoffice-files/ {
+            alias /srv/fnoffice-files/;
+            default_type application/octet-stream;
+            add_header Cache-Control "no-store";
+          }
+          location / {
+            proxy_http_version 1.1;
+            proxy_set_header Host $$host;
+            proxy_set_header Connection "";
+            proxy_set_header Accept-Encoding "";
+            proxy_pass http://unix:/run/fnoffice/app.sock:/;
+          }
+        }
+        EOF
+        exec nginx -g 'daemon off;'
+    volumes:
+      # The compose project lives below the installed target, so .. is a safe
+      # fallback for the Unix socket mount when FNOFFICE_APPDEST is unavailable.
+      - "${FNOFFICE_APPDEST:-..}:/run/fnoffice:ro"
+      - ./onlyoffice/bridge:/srv/fnoffice-files:ro
+    networks: [onlyoffice_internal]
+networks:
+  onlyoffice_internal: {}

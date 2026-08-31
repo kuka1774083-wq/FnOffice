@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+# The fnOS application settings wizard supplies the same environment fields
+# as the install wizard. Reuse the installer callback so selecting automatic
+# mode from 应用设置 also creates/repairs the Docker containers.
+script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd)"
+callback="$script_dir/install_callback"
+if [ -x "$callback" ]; then
+  exec "$callback"
+fi
+error_file="${TRIM_TEMP_LOGFILE:-/tmp/fnoffice-config.log}"
+echo "FnOffice 找不到配置回调依赖的 install_callback" > "$error_file"
+exit 1

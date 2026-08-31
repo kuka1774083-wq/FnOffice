@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>FnOffice 设置</title>
+  <link rel="stylesheet" href="/app/FnOffice/style.css">
+</head>
+<body>
+<main>
+  <h1>FnOffice 设置 <span id="appVersion" class="app-version">版本读取中…</span></h1>
+  <p class="hint">OnlyOffice 端口会监听所有网卡。安装向导填写的端口会同步显示在这里，请按需配置飞牛防火墙。</p>
+  <section><h2>连接</h2>
+    <p class="hint">当前 OnlyOffice 版本：<span id="onlyOfficeVersion">读取中…</span></p>
+    <label>OnlyOffice 服务地址（FnOffice 服务端内部访问）<input id="onlyOfficeUrl"></label>
+    <p class="hint">此地址由 FnOffice 服务端或 Docker 中继访问，127.0.0.1 不会发送给手机或公网浏览器。浏览器实际使用的地址由“浏览器访问方式”自动生成。</p>
+    <label>内部端口<input id="onlyOfficePort" type="number" min="1024" max="65535"></label>
+    <label class="check-option"><input id="distinguishMobile" type="checkbox"> <span>区分移动端界面</span></label>
+    <p class="hint">关闭时手机端也使用桌面版界面；开启后根据设备自动切换 OnlyOffice 移动端界面。安装向导与此设置保持同步。</p>
+    <label>浏览器访问方式<select id="browserOnlyOfficeMode"><option value="auto">自动（内网直连，fnConnect/公网走网关）</option><option value="gateway">始终走 FnOffice 网关</option><option value="direct">始终直连 OnlyOffice 端口</option></select></label>
+    <label>OnlyOffice 镜像地址<input id="onlyOfficeImage" value="docker.m.daocloud.io/onlyoffice/documentserver:latest"></label>
+    <label>回调中继镜像地址<input id="callbackImage" value="docker.m.daocloud.io/nginx:alpine"></label>
+    <label>FnOffice 对外基址<input id="publicBaseUrl" placeholder="由网关自动推断"></label>
+    <label>JWT Secret<input id="jwtSecret" type="password"></label>
+    <label>JWT Header<input id="jwtHeader"></label>
+    <label class="check-option"><input id="jwtInBody" type="checkbox"> <span>在请求体传 JWT</span></label>
+  </section>
+  <section><h2>协作与限制</h2>
+    <label>协作模式<select id="coEditingMode"><option value="fast">fast（实时协作）</option><option value="strict">strict</option></select></label>
+    <label class="check-option"><input id="forceSave" type="checkbox"> <span>启用强制保存</span></label>
+    <label>全局最大并发文档数<input id="maxGlobalDocuments" type="number" min="1"></label>
+    <p class="hint">限制 FnOffice 同时打开的不同文档总数；同一文档由多人协作编辑时只计 1 个文档。默认上限为 50，实际可根据 OnlyOffice 的 CPU、内存和并发负载调整。</p>
+    <label>单用户最大并发文档数<input id="maxUserDocuments" type="number" min="1"></label>
+    <label>会话超时（分钟）<input id="sessionTtlMinutes" type="number" min="1"></label>
+  </section>
+  <section><h2>在线编辑会话</h2>
+    <p class="hint">仅管理员可查看。在线状态依据编辑器每 10 秒心跳更新，连续 5 分钟无操作会请求 OnlyOffice 强制保存。</p>
+    <button id="refreshSessions" type="button">刷新在线会话</button>
+    <pre id="onlineSessions" class="session-list">正在读取…</pre>
+  </section>
+  <button id="save">保存设置</button> <button id="testConnection" type="button">测试 OnlyOffice 连接</button> <span id="status"></span>
+  <section><h2>飞牛 OS Docker 与多人在线编辑</h2>
+    <p>自动安装会直接创建两个 Docker 容器（OnlyOffice 与回调中继），均使用 <code>restart=always</code>，不会创建 Compose 项目。默认优先使用国内镜像代理；OnlyOffice 端口映射到所有网卡，可按需通过飞牛防火墙控制访问。</p>
+    <h3>飞牛 OS 手动部署教程</h3>
+    <ol>
+      <li>打开飞牛桌面“Docker”，进入“Compose”，点击“新增项目”。</li>
+      <li>项目名称填写 <code>fnoffice-onlyoffice</code>，将下方 YAML 粘贴到项目配置中。</li>
+      <li>把 <code>ONLYOFFICE_PORT</code> 改成设置页显示的内部端口，并设置随机的 <code>JWT_SECRET</code>。</li>
+      <li>确认项目目录位于飞牛可读写的存储空间，点击创建并启动；端口会监听所有网卡，请按需配置飞牛防火墙或路由访问策略。示例已启用私有地址访问，确保 OnlyOffice 能读取 FnOffice 的 Docker 内部文件中继。</li>
+      <li>回到本页填写相同的 OnlyOffice 地址、端口和 JWT Secret，保存后再打开文档。</li>
+    </ol>
+    <button id="copyCompose" type="button">复制 Compose 示例</button> <span id="tutorialStatus"></span>
+    <pre id="composeExample">services:
+  onlyoffice:
+    image: ${ONLYOFFICE_IMAGE:-docker.m.daocloud.io/onlyoffice/documentserver:latest}
+    restart: always
+    ports:
+      - "${ONLYOFFICE_PORT}:80"
+    environment:
+      JWT_ENABLED: "true"
+      JWT_SECRET: "${JWT_SECRET}"
+      JWT_HEADER: "Authorization"
+      JWT_IN_BODY: "false"
+      ALLOW_PRIVATE_IP_ADDRESS: "true"
+    volumes:
+      - ./onlyoffice/logs:/var/log/onlyoffice
+      - ./onlyoffice/data:/var/www/onlyoffice/Data
+      - ./onlyoffice/lib:/var/lib/onlyoffice
+    networks: [onlyoffice_internal]
+  callback-relay:
+    image: ${CALLBACK_IMAGE:-docker.m.daocloud.io/nginx:alpine}
+    restart: always
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        cat &gt;/etc/nginx/conf.d/default.conf &lt;&lt;'EOF'
+        server {
+          listen 9000;
+          location / {
+            proxy_http_version 1.1;
+            proxy_set_header Host $$host;
+            proxy_set_header Connection "";
+            proxy_pass http://unix:/run/fnoffice/app.sock:/;
+          }
+        }
+        EOF
+        exec nginx -g 'daemon off;'
+    volumes:
+      - ${FNOFFICE_APPDEST}:/run/fnoffice:ro
+    networks: [onlyoffice_internal]
+networks:
+  onlyoffice_internal: {}</pre>
+  </section>
+</main>
+<script src="/app/FnOffice/settings.js?v=0.4.73"></script>
+</body>
+</html>
