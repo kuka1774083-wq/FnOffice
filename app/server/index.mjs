@@ -24,7 +24,7 @@ const sharesPath = path.join(varDir, 'shares.json');
 const packageRoot = fs.existsSync(path.join(appDest,'app')) ? path.join(appDest,'app') : appDest;
 // Keep this build-time value in sync with manifest. fnOS deploys application
 // files separately from the manifest, so reading it at runtime is unreliable.
-const appVersion = '0.4.80-pre';
+const appVersion = '0.4.81-pre';
 const uiDir = path.join(packageRoot,'ui');
 const composeDir = path.join(packageRoot,'docker');
 const bridgeDir = path.join(composeDir,'onlyoffice','bridge');
@@ -491,7 +491,7 @@ async function handle(req,res) {
     try { const file=canonicalFile(u.searchParams.get('path')); if(!who.uid||!(await checkAcl(file,who,'read'))) return json(res,403,{error:'file_access_denied'}); await saveLatestBeforeDownload(file); return sendAttachment(res,file,path.basename(file)); }
     catch(error) { return json(res,400,{error:'download_failed',message:error.message}); }
   }
-  const publicDownload=u.pathname.match(/^\/share\/([^/]+)\/?$/);
+  const publicDownload=u.pathname.match(/^\/share\/([^/]+)\/download\/?$/);
   if(publicDownload&&req.method==='GET') { const share=await validShare(publicDownload[1],'download'); if(!share)return json(res,404,{error:'share_not_found'}); await saveLatestBeforeDownload(share.path); return sendAttachment(res,share.path,path.basename(share.path)); }
   const publicOpen=u.pathname.match(/^\/share\/([^/]+)\/?$/);
   if(publicOpen&&req.method==='GET') { const share=await validShare(publicOpen[1],'read'); if(!share){log('WARN','share token rejected',`token=${normalizeShareToken(publicOpen[1]).slice(0,12)} host=${req.headers.host||''}`);res.writeHead(404,{'content-type':'text/plain; charset=utf-8'});return res.end('分享链接不存在、已撤回或无权访问。');} return serveFile(res,path.join(uiDir,'open.html'),'text/html; charset=utf-8'); }
