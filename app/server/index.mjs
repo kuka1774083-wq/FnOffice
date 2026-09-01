@@ -23,7 +23,7 @@ const sessionsPath = path.join(varDir, 'sessions.json');
 const packageRoot = fs.existsSync(path.join(appDest,'app')) ? path.join(appDest,'app') : appDest;
 // Keep this build-time value in sync with manifest. fnOS deploys application
 // files separately from the manifest, so reading it at runtime is unreliable.
-const appVersion = '0.4.74';
+const appVersion = '0.4.75';
 const uiDir = path.join(packageRoot,'ui');
 const composeDir = path.join(packageRoot,'docker');
 const bridgeDir = path.join(composeDir,'onlyoffice','bridge');
@@ -426,8 +426,18 @@ async function handle(req,res) {
         : `${relayBase}/app/FnOffice/internal/storage/${id}/download/source.${extOf(file)}?token=${encodeURIComponent(sign(id))}`;
       const callback=`${relayBase}/app/FnOffice/internal/onlyoffice/callback/${id}?token=${encodeURIComponent(sign(id))}`;
       const payload={document:{fileType:extOf(file),key,title:path.basename(file),url:download},documentType:docType(extOf(file))};
-      const mobile=Boolean(config.distinguishMobile)&&isMobileUserAgent(req);
-      const editor={callbackUrl:callback,lang:config.editorLanguage||'zh-CN',mode:'edit',coEditing:{mode:config.coEditingMode,change:false},user:{id:anonUser(who.uid),name:who.username},customization:{forcesave:config.forceSave,mobileLayout:mobile}};
+      const mobileClient=isMobileUserAgent(req);
+      const mobile=Boolean(config.distinguishMobile)&&mobileClient;
+      const customization={forcesave:config.forceSave,mobileLayout:mobile};
+      // Keep the desktop editor type when mobile-layout detection is disabled,
+      // but start mobile clients with their side panels closed. hideRightMenu
+      // is the documented OnlyOffice option; the layout values are supported
+      // by newer Document Server builds and ignored harmlessly by older ones.
+      if (mobileClient) {
+        customization.hideRightMenu=true;
+        customization.layout={leftMenu:{mode:'hidden'},rightMenu:{mode:'hidden'}};
+      }
+      const editor={callbackUrl:callback,lang:config.editorLanguage||'zh-CN',mode:'edit',coEditing:{mode:config.coEditingMode,change:false},user:{id:anonUser(who.uid),name:who.username},customization};
       log('INFO','editor-session',`id=${id} uid=${who.uid} file=${file} relayBase=${relayBase} source=${download.includes('/fnoffice-files/')?'bridge-static':'application-relay'} download=${download}`);
       // Do not expose the server-side OnlyOffice address (often 127.0.0.1)
       // to the browser. The client receives only the gateway/direct URL that
