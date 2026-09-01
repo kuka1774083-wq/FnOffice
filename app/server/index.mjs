@@ -24,7 +24,7 @@ const sharesPath = path.join(varDir, 'shares.json');
 const packageRoot = fs.existsSync(path.join(appDest,'app')) ? path.join(appDest,'app') : appDest;
 // Keep this build-time value in sync with manifest. fnOS deploys application
 // files separately from the manifest, so reading it at runtime is unreliable.
-const appVersion = '0.4.81-pre';
+const appVersion = '0.5.0';
 const uiDir = path.join(packageRoot,'ui');
 const composeDir = path.join(packageRoot,'docker');
 const bridgeDir = path.join(composeDir,'onlyoffice','bridge');
@@ -425,6 +425,7 @@ async function handle(req,res) {
   // config.  Keep the server-side route protected as well so a direct URL
   // cannot bypass that gateway visibility rule.
   const who=userFrom(req);
+  if (u.pathname.startsWith('/share') || u.pathname==='/api/shares' || u.pathname==='/api/share-records') return json(res,404,{error:'sharing_removed'});
   if ((u.pathname==='/' || u.pathname==='/settings' || u.pathname==='/api/config') && !who.isAdmin) {
     if (u.pathname==='/api/config') return json(res,403,{error:'admin_required'});
     res.writeHead(403, {'content-type':'text/plain; charset=utf-8', 'cache-control':'no-store'});
@@ -645,9 +646,8 @@ async function handle(req,res) {
   }
   const cm=u.pathname.match(/^\/internal\/onlyoffice\/callback\/([^/]+)$/);if(cm&&req.method==='POST'){const s=sessions.get(cm[1]);if(!s||!validSign(s.id,u.searchParams.get('token')))return json(res,403,{error:'invalid_token'});const auth=req.headers[String(config.jwtHeader||'Authorization').toLowerCase()];if(auth&&config.jwtSecret&&!verifyJwt(auth,config.jwtSecret))return json(res,403,{error:'invalid_jwt'});try{const data=JSON.parse((await readBody(req)).toString()||'{}');const status=Number(data.status);s.lastSeen=Date.now();log('INFO','callback',`id=${s.id} status=${status} url=${data.url||''}`);if([2,6].includes(status)&&data.url){const editedUrl=normalizeOnlyOfficeDownload(data.url);const edited=await fetch(editedUrl).then(r=>{if(!r.ok)throw new Error(`download ${r.status}`);return r.arrayBuffer();});log('INFO','callback download',`id=${s.id} bytes=${edited.byteLength} url=${editedUrl}`);await atomicReplace(s.path,edited,s);s.forceSaveRequestedAt=0;s.lastSavedAt=Date.now();if(status===2) await dropSession(s.id,'saved'); else {s.idleSaveCompletedAt=Date.now();await persistSessions();log('INFO','callback saved',`id=${s.id} file=${s.path} mode=forcesave`);}}else if(status===4){await dropSession(s.id,'callback_closed');}else if([3,7].includes(status)){s.error=String(status);s.forceSaveRequestedAt=0;await persistSessions();}return json(res,200,{error:0});}catch(e){log('ERROR','callback save failed',`${s.path} ${e.stack||e.message}`);s.forceSaveRequestedAt=0;await persistSessions().catch(()=>{});return json(res,500,{error:1,message:e.message});}}
   if(u.pathname.startsWith('/onlyoffice/')) return proxyHttp(req,res,config.onlyOfficeUrl,u.pathname.replace('/onlyoffice','')+(u.search||''));
-  if(u.pathname==='/'||u.pathname==='/settings'||u.pathname==='/open'||u.pathname==='/shares'||u.pathname==='/auth-callback.html'){const file=path.join(uiDir,u.pathname==='/open'?'open.html':u.pathname==='/shares'?'shares.html':u.pathname==='/auth-callback.html'?'auth-callback.html':'index.html');return serveFile(res,file,'text/html; charset=utf-8');}
-  if(['/settings.js','/open.js','/shares.js','/auth-callback.js','/trim-web-app.js'].includes(u.pathname))return serveFile(res,path.join(uiDir,u.pathname.slice(1)),'application/javascript; charset=utf-8');
-  if(u.pathname==='/shares.css')return serveFile(res,path.join(uiDir,'shares.css'),'text/css; charset=utf-8');
+  if(u.pathname==='/'||u.pathname==='/settings'||u.pathname==='/open'||u.pathname==='/auth-callback.html'){const file=path.join(uiDir,u.pathname==='/open'?'open.html':u.pathname==='/auth-callback.html'?'auth-callback.html':'index.html');return serveFile(res,file,'text/html; charset=utf-8');}
+  if(['/settings.js','/open.js','/auth-callback.js','/trim-web-app.js'].includes(u.pathname))return serveFile(res,path.join(uiDir,u.pathname.slice(1)),'application/javascript; charset=utf-8');
   if(u.pathname==='/style.css')return serveFile(res,path.join(uiDir,'style.css'),'text/css; charset=utf-8');
   return json(res,404,{error:'not_found'});
 }
