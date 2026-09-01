@@ -1,5 +1,5 @@
 appname=FnOffice
-version=0.4.76
+version=0.4.76-pre
 display_name=FnOffice
 desc=飞牛 fnOS Office 文件编辑集成，支持 OnlyOffice 在线协作。
 source=thirdparty

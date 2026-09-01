@@ -23,7 +23,7 @@ const sessionsPath = path.join(varDir, 'sessions.json');
 const packageRoot = fs.existsSync(path.join(appDest,'app')) ? path.join(appDest,'app') : appDest;
 // Keep this build-time value in sync with manifest. fnOS deploys application
 // files separately from the manifest, so reading it at runtime is unreliable.
-const appVersion = '0.4.76';
+const appVersion = '0.4.76-pre';
 const uiDir = path.join(packageRoot,'ui');
 const composeDir = path.join(packageRoot,'docker');
 const bridgeDir = path.join(composeDir,'onlyoffice','bridge');
