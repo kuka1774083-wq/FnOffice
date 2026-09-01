@@ -36,7 +36,7 @@ function markActivity() { lastActivityAt = Date.now(); }
 function askConfirm(message) {
   return new Promise(resolve => {
     const dialog=document.createElement('dialog'); dialog.className='share-dialog confirm-dialog';
-    dialog.innerHTML=`<form method="dialog"><h2>确认操作</h2><p class="share-dialog-hint"></p><div class="share-dialog-actions"><button value="cancel" type="submit">取消</button><button class="editor-toolbar-button" value="ok" type="submit">确定</button></div></form>`;
+    dialog.innerHTML=`<form method="dialog"><h2>确认操作</h2><p style="margin:10px 0;color:#dc2626;font-weight:700;font-size:16px">分享功能仅支持公网使用</p><p class="share-dialog-hint"></p><div class="share-dialog-actions"><button value="cancel" type="submit">取消</button><button class="editor-toolbar-button" value="ok" type="submit">确定</button></div></form>`;
     dialog.querySelector('.share-dialog-hint').textContent=message; document.body.appendChild(dialog);
     dialog.addEventListener('close',()=>{resolve(dialog.returnValue==='ok');dialog.remove();},{once:true}); dialog.showModal();
   });
