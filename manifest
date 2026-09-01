@@ -1,5 +1,5 @@
 appname=FnOffice
-version=0.5.0
+version=0.5.1
 display_name=FnOffice
 desc=飞牛 fnOS Office 文件编辑集成，支持 OnlyOffice 在线协作。
 source=thirdparty
@@ -13,6 +13,6 @@ desktop_uidir=ui
 desktop_applaunchname=FnOffice.settings
 ctl_stop=true
 checkport=false
-disable_authorization_path=true
+disable_authorization_path=false
 micro_app=true
 install_dep_apps=nodejs_v22
