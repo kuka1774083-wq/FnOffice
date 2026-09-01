@@ -24,7 +24,7 @@ const sharesPath = path.join(varDir, 'shares.json');
 const packageRoot = fs.existsSync(path.join(appDest,'app')) ? path.join(appDest,'app') : appDest;
 // Keep this build-time value in sync with manifest. fnOS deploys application
 // files separately from the manifest, so reading it at runtime is unreliable.
-const appVersion = '0.4.78-pre';
+const appVersion = '0.4.79-pre';
 const uiDir = path.join(packageRoot,'ui');
 const composeDir = path.join(packageRoot,'docker');
 const bridgeDir = path.join(composeDir,'onlyoffice','bridge');
@@ -468,6 +468,24 @@ async function handle(req,res) {
       return json(res,200,{ok:true,previous:publicShare(active,req)});
     } catch(error) { return json(res,400,{error:'share_revoke_failed',message:error.message}); }
   }
+  if(u.pathname==='/api/share-records'&&req.method==='GET') {
+    const includeAll=who.isAdmin&&u.searchParams.get('all')==='1';
+    const owner=includeAll?'':who.uid;
+    if(!who.uid&&!includeAll)return json(res,403,{error:'login_required'});
+    const q=String(u.searchParams.get('q')||'').toLowerCase(); const status=String(u.searchParams.get('status')||'all');
+    const ownerFilter=String(u.searchParams.get('owner')||'').toLowerCase(); const from=Date.parse(u.searchParams.get('from')||'')||0; const to=Date.parse(u.searchParams.get('to')||'')||Infinity;
+    const records=[...shares.values()].filter(s=>s&&(!owner||String(s.ownerUid)===owner)&&(!q||s.path.toLowerCase().includes(q)||path.basename(s.path).toLowerCase().includes(q))&&(!ownerFilter||String(s.ownerUsername||'').toLowerCase().includes(ownerFilter)||String(s.ownerUid).toLowerCase().includes(ownerFilter))&&Number(s.createdAt||0)>=from&&Number(s.createdAt||0)<=to).filter(s=>status==='all'||(status==='revoked'&&!s.active)||(status==='readonly'&&s.active&&!s.permissions.download&&!s.permissions.write)||(status==='download'&&s.active&&s.permissions.download)||(status==='editable'&&s.active&&s.permissions.write));
+    records.sort((a,b)=>Number(b.createdAt||0)-Number(a.createdAt||0));
+    const out=[]; for(const s of records){let size=0;try{size=(await fsp.stat(s.path)).size;}catch{} out.push({...publicShare(s,req),token:s.token,path:s.path,fileName:path.basename(s.path),ownerUid:s.ownerUid,ownerUsername:s.ownerUsername,size});}
+    return json(res,200,{records:out,admin:includeAll});
+  }
+  if(u.pathname==='/api/share-records'&&req.method==='DELETE') {
+    const token=String(u.searchParams.get('token')||''); const s=shares.get(token);
+    if(!s||(!who.isAdmin&&String(s.ownerUid)!==String(who.uid)))return json(res,404,{error:'share_not_found'});
+    shares.delete(token); await persistShares();
+    for(const [id,session] of sessions) if(session.shareToken===token) await dropSession(id,'share_record_cleared');
+    return json(res,200,{ok:true});
+  }
   if(u.pathname==='/api/file-download'&&req.method==='GET') {
     try { const file=canonicalFile(u.searchParams.get('path')); if(!who.uid||!(await checkAcl(file,who,'read'))) return json(res,403,{error:'file_access_denied'}); await saveLatestBeforeDownload(file); return sendAttachment(res,file,path.basename(file)); }
     catch(error) { return json(res,400,{error:'download_failed',message:error.message}); }
@@ -626,8 +644,9 @@ async function handle(req,res) {
   }
   const cm=u.pathname.match(/^\/internal\/onlyoffice\/callback\/([^/]+)$/);if(cm&&req.method==='POST'){const s=sessions.get(cm[1]);if(!s||!validSign(s.id,u.searchParams.get('token')))return json(res,403,{error:'invalid_token'});const auth=req.headers[String(config.jwtHeader||'Authorization').toLowerCase()];if(auth&&config.jwtSecret&&!verifyJwt(auth,config.jwtSecret))return json(res,403,{error:'invalid_jwt'});try{const data=JSON.parse((await readBody(req)).toString()||'{}');const status=Number(data.status);s.lastSeen=Date.now();log('INFO','callback',`id=${s.id} status=${status} url=${data.url||''}`);if([2,6].includes(status)&&data.url){const editedUrl=normalizeOnlyOfficeDownload(data.url);const edited=await fetch(editedUrl).then(r=>{if(!r.ok)throw new Error(`download ${r.status}`);return r.arrayBuffer();});log('INFO','callback download',`id=${s.id} bytes=${edited.byteLength} url=${editedUrl}`);await atomicReplace(s.path,edited,s);s.forceSaveRequestedAt=0;s.lastSavedAt=Date.now();if(status===2) await dropSession(s.id,'saved'); else {s.idleSaveCompletedAt=Date.now();await persistSessions();log('INFO','callback saved',`id=${s.id} file=${s.path} mode=forcesave`);}}else if(status===4){await dropSession(s.id,'callback_closed');}else if([3,7].includes(status)){s.error=String(status);s.forceSaveRequestedAt=0;await persistSessions();}return json(res,200,{error:0});}catch(e){log('ERROR','callback save failed',`${s.path} ${e.stack||e.message}`);s.forceSaveRequestedAt=0;await persistSessions().catch(()=>{});return json(res,500,{error:1,message:e.message});}}
   if(u.pathname.startsWith('/onlyoffice/')) return proxyHttp(req,res,config.onlyOfficeUrl,u.pathname.replace('/onlyoffice','')+(u.search||''));
-  if(u.pathname==='/'||u.pathname==='/settings'||u.pathname==='/open'||u.pathname==='/auth-callback.html'){const file=path.join(uiDir,u.pathname==='/open'?'open.html':u.pathname==='/auth-callback.html'?'auth-callback.html':'index.html');return serveFile(res,file,'text/html; charset=utf-8');}
-  if(['/settings.js','/open.js','/auth-callback.js','/trim-web-app.js'].includes(u.pathname))return serveFile(res,path.join(uiDir,u.pathname.slice(1)),'application/javascript; charset=utf-8');
+  if(u.pathname==='/'||u.pathname==='/settings'||u.pathname==='/open'||u.pathname==='/shares'||u.pathname==='/auth-callback.html'){const file=path.join(uiDir,u.pathname==='/open'?'open.html':u.pathname==='/shares'?'shares.html':u.pathname==='/auth-callback.html'?'auth-callback.html':'index.html');return serveFile(res,file,'text/html; charset=utf-8');}
+  if(['/settings.js','/open.js','/shares.js','/auth-callback.js','/trim-web-app.js'].includes(u.pathname))return serveFile(res,path.join(uiDir,u.pathname.slice(1)),'application/javascript; charset=utf-8');
+  if(u.pathname==='/shares.css')return serveFile(res,path.join(uiDir,'shares.css'),'text/css; charset=utf-8');
   if(u.pathname==='/style.css')return serveFile(res,path.join(uiDir,'style.css'),'text/css; charset=utf-8');
   return json(res,404,{error:'not_found'});
 }

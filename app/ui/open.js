@@ -3,6 +3,7 @@ import { TrimApp } from '/app/FnOffice/trim-web-app.js?v=0.4.59';
 const pageUrl = new URL(location.href);
 const filePath = pageUrl.searchParams.get('path');
 const shareToken = pageUrl.pathname.match(/\/share\/([^/]+)$/)?.[1] || '';
+const manageShareToken = pageUrl.searchParams.get('manageShare') || '';
 const msg = document.getElementById('message');
 const auth = document.getElementById('authorize');
 const openStandaloneButton = document.getElementById('openStandalone');
@@ -256,5 +257,5 @@ auth.onclick = async () => {
   }
 };
 
-if (!shareToken) void loadShareState().catch(() => { shareButton.hidden = true; });
+if (!shareToken) void loadShareState().then(state => { if (manageShareToken && state?.active) showShareDialog(state.active); }).catch(() => { shareButton.hidden = true; });
 openDoc();
