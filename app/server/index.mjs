@@ -9,6 +9,9 @@ import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { URL } from 'node:url';
 
+const onlyOfficeHttpAgent = new http.Agent({keepAlive:true,maxSockets:100,keepAliveMsecs:30000});
+const onlyOfficeHttpsAgent = new https.Agent({keepAlive:true,maxSockets:100,keepAliveMsecs:30000});
+
 const appDest = process.env.TRIM_APPDEST || path.resolve(process.cwd());
 const appName = path.basename(appDest);
 const volumeRoot = path.dirname(path.dirname(appDest));
@@ -24,7 +27,7 @@ const sharesPath = path.join(varDir, 'shares.json');
 const packageRoot = fs.existsSync(path.join(appDest,'app')) ? path.join(appDest,'app') : appDest;
 // Keep this build-time value in sync with manifest. fnOS deploys application
 // files separately from the manifest, so reading it at runtime is unreliable.
-const appVersion = '0.5.1';
+const appVersion = '0.6.0';
 const uiDir = path.join(packageRoot,'ui');
 const composeDir = path.join(packageRoot,'docker');
 const bridgeDir = path.join(composeDir,'onlyoffice','bridge');
@@ -161,7 +164,15 @@ function onlyOfficeCommand(command) {
   });
 }
 async function forceSaveSession(session,reason='') {
-  if(!session||!sessions.has(session.id)||session.forceSaveRequestedAt) return false;
+  if(!session||!sessions.has(session.id)) return false;
+  // An automatic/idle force-save may already be in flight.  Reuse it briefly,
+  // but allow a toolbar download to retry when the previous request has been
+  // waiting too long; otherwise the download could return the pre-edit file.
+  if(session.forceSaveRequestedAt) {
+    const age=Date.now()-Number(session.forceSaveRequestedAt);
+    if(age<3000) return true;
+    session.forceSaveRequestedAt=0;
+  }
   session.forceSaveRequestedAt=Date.now();
   try {
     const result=await onlyOfficeCommand({c:'forcesave',key:session.key});
@@ -185,7 +196,7 @@ async function saveLatestBeforeDownload(file) {
   const byKey=new Map(); for(const session of targets) if(!byKey.has(session.key)) byKey.set(session.key,session);
   if(!byKey.size) return false;
   await Promise.all([...byKey.values()].map(session=>forceSaveSession(session,'toolbar_download').catch(()=>false)));
-  const deadline=Date.now()+15000;
+  const deadline=Date.now()+30000;
   while(Date.now()<deadline) {
     if(targets.some(session=>Number(session.lastSavedAt||0)>=started)) return true;
     await wait(250);
@@ -368,7 +379,7 @@ function proxyHttp(req,res,target,pathName) {
   const u=new URL(target); const client=u.protocol==='https:'?https:http;
   const headers=onlyOfficeProxyHeaders(req,target);
   log('INFO','onlyoffice proxy request',`${req.method} ${pathName} host=${u.host}`);
-  const r=client.request({hostname:u.hostname,port:u.port|| (u.protocol==='https:'?443:80),method:req.method,path:pathName,headers,rejectUnauthorized:config.verifyTls},up=>{
+  const r=client.request({hostname:u.hostname,port:u.port|| (u.protocol==='https:'?443:80),method:req.method,path:pathName,headers,rejectUnauthorized:config.verifyTls,agent:u.protocol==='https:'?onlyOfficeHttpsAgent:onlyOfficeHttpAgent},up=>{
     log('INFO','onlyoffice proxy response',`${req.method} ${pathName} status=${up.statusCode||0}`);
     res.writeHead(up.statusCode||502,up.headers); up.pipe(res);
   });
@@ -404,6 +415,8 @@ function proxyUpgrade(req,socket,head,target,pathName) {
     if(upstreamHead.length) socket.write(upstreamHead);
     socket.pipe(connected);
     connected.pipe(socket);
+    socket.setTimeout(0);
+    connected.setTimeout(0);
      log('INFO','onlyoffice websocket upgraded',`${pathName} status=${response.statusCode||101}`);
     connected.on('close',()=>log('INFO','onlyoffice websocket upstream close',pathName));
   });
@@ -487,10 +500,6 @@ async function handle(req,res) {
     shares.delete(token); await persistShares();
     for(const [id,session] of sessions) if(session.shareToken===token) await dropSession(id,'share_record_cleared');
     return json(res,200,{ok:true});
-  }
-  if(u.pathname==='/api/file-download'&&req.method==='GET') {
-    try { const file=canonicalFile(u.searchParams.get('path')); if(!who.uid||!(await checkAcl(file,who,'read'))) return json(res,403,{error:'file_access_denied'}); await saveLatestBeforeDownload(file); return sendAttachment(res,file,path.basename(file)); }
-    catch(error) { return json(res,400,{error:'download_failed',message:error.message}); }
   }
   const publicDownload=u.pathname.match(/^\/share\/([^/]+)\/download\/?$/);
   if(publicDownload&&req.method==='GET') { const share=await validShare(publicDownload[1],'download'); if(!share)return json(res,404,{error:'share_not_found'}); await saveLatestBeforeDownload(share.path); return sendAttachment(res,share.path,path.basename(share.path)); }
