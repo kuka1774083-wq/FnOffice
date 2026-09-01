@@ -3,12 +3,14 @@ import { TrimApp } from '/app/FnOffice/trim-web-app.js?v=0.4.59';
 const filePath = new URLSearchParams(location.search).get('path');
 const msg = document.getElementById('message');
 const auth = document.getElementById('authorize');
+const openStandaloneButton = document.getElementById('openStandalone');
 const apiBase = '/app/FnOffice';
 const sdk = new TrimApp();
 let currentSessionId = '';
 let editorInstance = null;
 let lastActivityAt = Date.now();
 let heartbeatTimer = null;
+let handingOffToStandalone = false;
 
 function markActivity() { lastActivityAt = Date.now(); }
 ['pointerdown', 'keydown', 'input', 'focus'].forEach(type => window.addEventListener(type, markActivity, { passive: true }));
@@ -42,7 +44,30 @@ async function requestForceSave() {
     });
   } catch {}
 }
-window.addEventListener('pagehide', () => { void requestForceSave(); });
+window.addEventListener('pagehide', () => { if (!handingOffToStandalone) void requestForceSave(); });
+
+async function openStandaloneEditor() {
+  if (!filePath || handingOffToStandalone) return;
+  handingOffToStandalone = true;
+  openStandaloneButton.disabled = true;
+  try {
+    const target = new URL(location.href);
+    target.searchParams.set('standalone', '1');
+    await sdk.ready();
+    await sdk.openURL(target.toString(), '_blank');
+    await sdk.close();
+  } catch (error) {
+    handingOffToStandalone = false;
+    openStandaloneButton.disabled = false;
+    msg.textContent = `无法打开独立编辑器：${error.message || error}`;
+  }
+}
+
+if (new URLSearchParams(location.search).get('standalone') === '1') {
+  openStandaloneButton.hidden = true;
+} else {
+  openStandaloneButton.onclick = openStandaloneEditor;
+}
 
 async function reportEditorError(code, description = '') {
   if (!currentSessionId) return;
