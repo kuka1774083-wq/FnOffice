@@ -3,6 +3,8 @@ const pageUrl=new URL(location.href), filePath=pageUrl.searchParams.get('path'),
 if(pageUrl.searchParams.get('standalone')==='1')document.body.classList.add('standalone-editor');
 const msg=document.getElementById('message'), auth=document.getElementById('authorize'), openStandaloneButton=document.getElementById('openStandalone'), downloadButton=document.getElementById('downloadFile'), sdk=new TrimApp();
 downloadButton?.remove();
+const mobileClient=/android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini|mobile|phone|tablet/i.test(`${navigator.userAgent} ${navigator.platform}`);
+if(mobileClient)openStandaloneButton?.remove();
 let currentSessionId='', editorInstance=null, heartbeatTimer=null, lastActivityAt=Date.now(), handingOff=false, editorReady=false, reconnecting=false, reconnectAttempt=0;
 const markActivity=()=>{lastActivityAt=Date.now()}; ['pointerdown','keydown','input','focus'].forEach(t=>window.addEventListener(t,markActivity,{passive:true}));
 async function heartbeat(){if(!currentSessionId)return;try{await fetch(`${apiBase}/api/editor-session/${encodeURIComponent(currentSessionId)}/heartbeat`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({lastActivityAt,visible:document.visibilityState==='visible'}),keepalive:true})}catch{}}
