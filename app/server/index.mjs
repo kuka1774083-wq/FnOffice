@@ -20,10 +20,11 @@ const tmpDir = process.env.TRIM_PKGTMP || path.join(appDest, 'tmp');
 const socketPath = process.env.FNOFFICE_SOCKET || path.join(appDest, 'app.sock');
 const configPath = path.join(etcDir, 'config.json');
 const sessionsPath = path.join(varDir, 'sessions.json');
+const sharesPath = path.join(varDir, 'shares.json');
 const packageRoot = fs.existsSync(path.join(appDest,'app')) ? path.join(appDest,'app') : appDest;
 // Keep this build-time value in sync with manifest. fnOS deploys application
 // files separately from the manifest, so reading it at runtime is unreliable.
-const appVersion = '0.4.76-pre';
+const appVersion = '0.4.78-pre';
 const uiDir = path.join(packageRoot,'ui');
 const composeDir = path.join(packageRoot,'docker');
 const bridgeDir = path.join(composeDir,'onlyoffice','bridge');
@@ -36,6 +37,10 @@ const defaults = { installOnlyOffice:false, onlyOfficePort:18081, onlyOfficeUrl:
 // failed key from poisoning the next FnOffice run.
 const documentBootGeneration = crypto.randomBytes(12).toString('hex');
 const sessions = new Map();
+// Shares are persisted independently from editor sessions. Revoking a link
+// only disables it: keeping its token lets the owner deliberately reuse the
+// same address later, while a "new link" always receives a fresh token.
+const shares = new Map(Object.entries(readJson(sharesPath, {})));
 const IDLE_FORCE_SAVE_MS = 5 * 60 * 1000;
 
 await Promise.all([fsp.mkdir(etcDir,{recursive:true}),fsp.mkdir(varDir,{recursive:true}),fsp.mkdir(tmpDir,{recursive:true}),fsp.mkdir(composeDir,{recursive:true}),fsp.mkdir(bridgeDir,{recursive:true})]);
@@ -81,6 +86,7 @@ function log(level, message, details='') {
   else console.log(message, details);
 }
 async function persistSessions() { await writeJson(sessionsPath,Object.fromEntries(sessions)); }
+async function persistShares() { await writeJson(sharesPath,Object.fromEntries(shares)); }
 async function dropSession(id,reason='') {
   const session=sessions.get(id);
   if(!session) return false;
@@ -92,6 +98,35 @@ async function dropSession(id,reason='') {
 }
 function json(res,status,data) { const out=JSON.stringify(data); res.writeHead(status,{'content-type':'application/json; charset=utf-8','content-length':Buffer.byteLength(out)}); res.end(out); }
 function userFrom(req) { return {uid:String(req.headers['x-trim-userid']||''),username:String(req.headers['x-trim-username']||'飞牛用户'),isAdmin:String(req.headers['x-trim-isadmin']||'').toLowerCase()==='true'}; }
+function publicBase(req) {
+  const forwardedProto=String(req.headers['x-forwarded-proto']||'').split(',')[0].trim();
+  const forwardedHost=String(req.headers['x-forwarded-host']||'').split(',')[0].trim();
+  const proto=forwardedProto||((req.socket&&req.socket.encrypted)?'https':'http');
+  const host=forwardedHost||String(req.headers.host||'').trim();
+  return host?`${proto}://${host}`:String(config.publicBaseUrl||'http://localhost').replace(/\/$/, '');
+}
+function shareUrl(req,token) { return `${publicBase(req)}/app/FnOffice/share/${encodeURIComponent(token)}`; }
+function sharesFor(ownerUid,file) { return [...shares.values()].filter(s=>s&&String(s.ownerUid)===String(ownerUid)&&s.path===file).sort((a,b)=>Number(b.createdAt||0)-Number(a.createdAt||0)); }
+function publicShare(share,req) { return {active:share.active===true,permissions:{read:true,download:share.permissions?.download===true,write:share.permissions?.write===true},createdAt:share.createdAt,revokedAt:share.revokedAt||null,url:shareUrl(req,share.token)}; }
+async function validShare(token,need='read') {
+  const share=shares.get(String(token||''));
+  if(!share||share.active!==true||share.permissions?.read!==true) return null;
+  if(need==='download'&&share.permissions?.download!==true) return null;
+  if(need==='write'&&share.permissions?.write!==true) return null;
+  if(!(await checkAcl(share.path,{uid:share.ownerUid},need==='write'?'write':'read'))) return null;
+  return share;
+}
+function sessionAllowed(session,who,shareToken='') { const expected=Buffer.from(String(session?.shareToken||'')); const received=Buffer.from(String(shareToken||'')); return Boolean(session&&(who.isAdmin||(who.uid&&String(session.uid)===String(who.uid))||(expected.length>0&&expected.length===received.length&&crypto.timingSafeEqual(expected,received)))); }
+async function sendAttachment(res,file,downloadName) {
+  try {
+    const stat=await fsp.stat(file);
+    if(!stat.isFile()) throw new Error('file_not_found');
+    const ext=extOf(file); const mime={docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',doc:'application/msword',pdf:'application/pdf',xlsx:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',xls:'application/vnd.ms-excel',pptx:'application/vnd.openxmlformats-officedocument.presentationml.presentation',ppt:'application/vnd.ms-powerpoint'}[ext]||'application/octet-stream';
+    const safe=String(downloadName||path.basename(file)).replace(/[\\\r\n"]/g,'_');
+    res.writeHead(200,{'content-type':mime,'content-length':stat.size,'content-disposition':`attachment; filename="${safe}"; filename*=UTF-8''${encodeURIComponent(downloadName||path.basename(file))}`,'cache-control':'no-store','x-content-type-options':'nosniff'});
+    fs.createReadStream(file).on('error',()=>res.destroy()).pipe(res);
+  } catch(error) { json(res,error?.code==='EACCES'?403:404,{error:error?.code==='EACCES'?'file_access_denied':'file_not_found'}); }
+}
 function isMobileUserAgent(req) {
   const hints=[req.headers['user-agent'],req.headers['sec-ch-ua-mobile'],req.headers['x-trim-client'],req.headers['x-trim-device'],req.headers['x-trim-platform']].map(value=>String(value||'').toLowerCase()).join(' ');
   return /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini|mobile|phone|tablet|\?1/.test(hints);
@@ -136,6 +171,26 @@ async function forceSaveSession(session,reason='') {
     log('ERROR','force save request failed',`id=${session.id} reason=${reason} ${error.message}`);
     return false;
   }
+}
+function wait(ms) { return new Promise(resolve=>setTimeout(resolve,ms)); }
+// A Document Server force-save is asynchronous: it replies to the command
+// first and delivers the edited bytes through the callback shortly after.
+// Wait for that callback before serving a user-requested download, so the
+// toolbar download reflects the current editor state instead of the last
+// already-written source file.
+async function saveLatestBeforeDownload(file) {
+  const started=Date.now();
+  const targets=[...sessions.values()].filter(s=>s.active&&s.path===file&&!s.error);
+  const byKey=new Map(); for(const session of targets) if(!byKey.has(session.key)) byKey.set(session.key,session);
+  if(!byKey.size) return false;
+  await Promise.all([...byKey.values()].map(session=>forceSaveSession(session,'toolbar_download').catch(()=>false)));
+  const deadline=Date.now()+15000;
+  while(Date.now()<deadline) {
+    if(targets.some(session=>Number(session.lastSavedAt||0)>=started)) return true;
+    await wait(250);
+  }
+  log('WARN','download save wait timed out',`file=${file} sessions=${targets.length}`);
+  return false;
 }
 async function readBody(req) { const chunks=[]; for await(const c of req) chunks.push(c); return Buffer.concat(chunks); }
 async function trimApi(req,data={}) {
@@ -377,12 +432,58 @@ async function handle(req,res) {
   if(u.pathname==='/api/health'){const connected=await probeOnlyOffice();const version=(connected?await detectOnlyOfficeVersion():'')||await detectDockerOnlyOfficeVersion();log('INFO','health',`connected=${connected} version=${version||'unknown'} onlyOffice=${config.onlyOfficeUrl}`);return json(res,connected?200:503,{ok:connected,onlyOfficeUrl:config.onlyOfficeUrl,onlyOfficePort:config.onlyOfficePort,onlyOfficeVersion:version||null,reason:connected?'ready':'onlyoffice_unreachable'});}
   if(u.pathname==='/api/config'&&req.method==='GET'){const who=userFrom(req);return json(res,200,{...config,appVersion,jwtSecret:who.isAdmin?config.jwtSecret:(config.jwtSecret?'********':'')});}
   if(u.pathname==='/api/config'&&req.method==='PUT'){const who=userFrom(req);if(!who.isAdmin)return json(res,403,{error:'admin_required'});const old={...config};try{const next=JSON.parse((await readBody(req)).toString()||'{}');const port=Number(next.onlyOfficePort);if(!Number.isInteger(port)||port<1024||port>65535)throw new Error('invalid port');if(next.jwtSecret==='********')next.jwtSecret=old.jwtSecret;const oldLocal=`http://127.0.0.1:${old.onlyOfficePort}`;const shouldSyncLocal=!next.onlyOfficeUrl||next.onlyOfficeUrl===oldLocal;config={...old,...next,onlyOfficePort:port,onlyOfficeUrl:shouldSyncLocal?`http://127.0.0.1:${port}`:next.onlyOfficeUrl};await writeJson(configPath,config);await syncCompose();await restartCompose();return json(res,200,{...config,jwtSecret:config.jwtSecret?'********':''});}catch(e){config=old;await writeJson(configPath,config);return json(res,400,{error:'config_update_failed',message:e.message});}}
+  if(u.pathname==='/api/shares'&&req.method==='GET') {
+    try {
+      const file=canonicalFile(u.searchParams.get('path'));
+      if(!who.uid||!(await checkAcl(file,who,'write'))) return json(res,403,{error:'file_owner_required'});
+      const history=sharesFor(who.uid,file); const active=history.find(s=>s.active===true);
+      return json(res,200,{active:active?publicShare(active,req):null,previous:history[0]?publicShare(history[0],req):null,hasPrevious:history.length>0});
+    } catch(error) { return json(res,400,{error:'invalid_share_request',message:error.message}); }
+  }
+  if(u.pathname==='/api/shares'&&req.method==='PUT') {
+    try {
+      const input=JSON.parse((await readBody(req)).toString()||'{}'); const file=canonicalFile(input.path);
+      if(!who.uid||!(await checkAcl(file,who,'write'))) return json(res,403,{error:'file_owner_required'});
+      const history=sharesFor(who.uid,file); const latest=history[0]; const mode=input.mode==='reuse'?'reuse':'new';
+      let share=mode==='reuse'?latest:null;
+      if(!share) {
+        const token=crypto.randomBytes(24).toString('base64url');
+        share={token,path:file,ownerUid:who.uid,ownerUsername:who.username,createdAt:Date.now(),permissions:{read:true,download:false,write:false}};
+        shares.set(token,share);
+      }
+      share.active=true; share.revokedAt=null; share.updatedAt=Date.now();
+      share.permissions={read:true,download:input.permissions?.download===true,write:input.permissions?.write===true};
+      await persistShares(); log('INFO','share enabled',`token=${share.token.slice(0,8)} owner=${who.uid} file=${file} write=${share.permissions.write} download=${share.permissions.download}`);
+      return json(res,200,{share:publicShare(share,req),reused:mode==='reuse'&&Boolean(latest)});
+    } catch(error) { log('ERROR','share enable failed',error.message); return json(res,400,{error:'share_enable_failed',message:error.message}); }
+  }
+  if(u.pathname==='/api/shares'&&req.method==='DELETE') {
+    try {
+      const file=canonicalFile(u.searchParams.get('path'));
+      if(!who.uid||!(await checkAcl(file,who,'write'))) return json(res,403,{error:'file_owner_required'});
+      const active=sharesFor(who.uid,file).find(s=>s.active===true);
+      if(!active) return json(res,404,{error:'share_not_found'});
+      active.active=false; active.revokedAt=Date.now(); active.updatedAt=Date.now(); await persistShares();
+      log('INFO','share revoked',`token=${active.token.slice(0,8)} owner=${who.uid} file=${file}`);
+      return json(res,200,{ok:true,previous:publicShare(active,req)});
+    } catch(error) { return json(res,400,{error:'share_revoke_failed',message:error.message}); }
+  }
+  if(u.pathname==='/api/file-download'&&req.method==='GET') {
+    try { const file=canonicalFile(u.searchParams.get('path')); if(!who.uid||!(await checkAcl(file,who,'read'))) return json(res,403,{error:'file_access_denied'}); await saveLatestBeforeDownload(file); return sendAttachment(res,file,path.basename(file)); }
+    catch(error) { return json(res,400,{error:'download_failed',message:error.message}); }
+  }
+  const publicDownload=u.pathname.match(/^\/share\/([^/]+)\/download$/);
+  if(publicDownload&&req.method==='GET') { const share=await validShare(publicDownload[1],'download'); if(!share)return json(res,404,{error:'share_not_found'}); await saveLatestBeforeDownload(share.path); return sendAttachment(res,share.path,path.basename(share.path)); }
+  const publicOpen=u.pathname.match(/^\/share\/([^/]+)$/);
+  if(publicOpen&&req.method==='GET') { const share=await validShare(publicOpen[1],'read'); if(!share){res.writeHead(404,{'content-type':'text/plain; charset=utf-8'});return res.end('分享链接不存在、已撤回或无权访问。');} return serveFile(res,path.join(uiDir,'open.html'),'text/html; charset=utf-8'); }
   if (u.pathname==='/api/editor-session' && req.method==='POST') {
-    const who=userFrom(req);
     try {
       const input=JSON.parse((await readBody(req)).toString()||'{}');
-      const file=canonicalFile(input.path);
-      if (!(await checkAcl(file,who))) return json(res,403,{error:'file_access_denied'});
+      const shareToken=String(input.shareToken||''); const share=shareToken?await validShare(shareToken,'read'):null;
+      if(shareToken&&!share) return json(res,404,{error:'share_not_found'});
+      const editorUser=share?{uid:String(share.ownerUid),username:'共享访客',isAdmin:false}:who;
+      const file=share?share.path:canonicalFile(input.path);
+      if (!share&&!(await checkAcl(file,editorUser))) return json(res,403,{error:'file_access_denied'});
       const stat=await fsp.stat(file);
       // Keep one OnlyOffice document key for all currently active editors of
       // the same source file so co-editing remains enabled.  A fresh key is
@@ -392,13 +493,13 @@ async function handle(req,res) {
        const same=[...sessions.values()].find(s=>s.path===file&&s.active&&!s.error&&s.size===stat.size&&s.mtimeMs===stat.mtimeMs&&Date.now()-s.lastSeen<60000);
       const key=same?.key||docKey(file,stat);
       const global=new Set([...sessions.values()].filter(s=>s.active).map(s=>s.key));
-      const mine=new Set([...sessions.values()].filter(s=>s.active&&s.uid===who.uid).map(s=>s.key));
+      const mine=new Set([...sessions.values()].filter(s=>s.active&&s.uid===editorUser.uid).map(s=>s.key));
       if (!same&&global.size>=config.maxGlobalDocuments) return json(res,429,{error:'global_limit'});
       if (!same&&mine.size>=config.maxUserDocuments) return json(res,429,{error:'user_limit'});
       if (!(await probeOnlyOffice())) return json(res,503,{error:'onlyoffice_unreachable',message:'OnlyOffice 尚未就绪，请在 Docker 中确认容器和端口后重试。'});
       const id=crypto.randomUUID();
         const now=Date.now();
-        const session={id,path:file,key,uid:who.uid,username:who.username,active:true,size:stat.size,mtimeMs:stat.mtimeMs,createdAt:now,lastSeen:now,lastActivityAt:now,forceSaveRequestedAt:0,idleSaveCompletedAt:0};
+        const session={id,path:file,key,uid:editorUser.uid,username:editorUser.username,shareToken:share?.token||'',shareWritable:share?.permissions?.write===true,active:true,size:stat.size,mtimeMs:stat.mtimeMs,createdAt:now,lastSeen:now,lastActivityAt:now,forceSaveRequestedAt:0,idleSaveCompletedAt:0};
        session.bridgeFile=bridgePath(session);
        await fsp.copyFile(file,session.bridgeFile);
        await fsp.chmod(session.bridgeFile,0o644);
@@ -437,8 +538,9 @@ async function handle(req,res) {
         customization.hideRightMenu=true;
         customization.layout={leftMenu:{mode:'hidden'},rightMenu:{mode:'hidden'}};
       }
-      const editor={callbackUrl:callback,lang:config.editorLanguage||'zh-CN',mode:'edit',coEditing:{mode:config.coEditingMode,change:false},user:{id:anonUser(who.uid),name:who.username},customization};
-      log('INFO','editor-session',`id=${id} uid=${who.uid} file=${file} relayBase=${relayBase} source=${download.includes('/fnoffice-files/')?'bridge-static':'application-relay'} download=${download}`);
+      const visitorId=String(input.visitorId||'').slice(0,100);
+      const editor={callbackUrl:callback,lang:config.editorLanguage||'zh-CN',mode:share&&!share.permissions.write?'view':'edit',coEditing:{mode:config.coEditingMode,change:false},user:{id:anonUser(share?`share:${share.token}:${visitorId||id}`:editorUser.uid),name:share?'共享访客':editorUser.username},customization};
+      log('INFO','editor-session',`id=${id} uid=${editorUser.uid} shared=${Boolean(share)} file=${file} relayBase=${relayBase} source=${download.includes('/fnoffice-files/')?'bridge-static':'application-relay'} download=${download}`);
       // Do not expose the server-side OnlyOffice address (often 127.0.0.1)
       // to the browser. The client receives only the gateway/direct URL that
       // browserOnlyOfficeUrl() selected for its actual request origin.
@@ -450,12 +552,11 @@ async function handle(req,res) {
    }
   const em=u.pathname.match(/^\/api\/editor-session\/([^/]+)\/error$/);
   if (em&&req.method==='POST') {
-    const who=userFrom(req);
     const session=sessions.get(em[1]);
     if(!session) return json(res,200,{ok:true,alreadyClosed:true});
-    if(!who.uid||(!who.isAdmin&&String(session.uid)!==String(who.uid))) return json(res,403,{error:'session_owner_required'});
     let detail={};
     try { detail=JSON.parse((await readBody(req)).toString()||'{}'); } catch {}
+    if(!sessionAllowed(session,who,detail.shareToken)) return json(res,403,{error:'session_owner_required'});
     const code=String(detail.code||'unknown').slice(0,32);
     await dropSession(session.id,`editor_error=${code}`);
     return json(res,200,{ok:true});
@@ -464,8 +565,8 @@ async function handle(req,res) {
   if(hm&&req.method==='POST') {
     const session=sessions.get(hm[1]);
     if(!session) return json(res,404,{error:'session_not_found'});
-    if(!who.uid||(!who.isAdmin&&String(session.uid)!==String(who.uid))) return json(res,403,{error:'session_owner_required'});
     let detail={}; try { detail=JSON.parse((await readBody(req)).toString()||'{}'); } catch {}
+    if(!sessionAllowed(session,who,detail.shareToken)) return json(res,403,{error:'session_owner_required'});
     const activity=Number(detail.lastActivityAt); const previous=session.lastActivityAt||session.lastSeen;
     session.lastSeen=Date.now();
     session.active=true;
@@ -478,7 +579,8 @@ async function handle(req,res) {
   if(fm&&req.method==='POST') {
     const session=sessions.get(fm[1]);
     if(!session) return json(res,404,{error:'session_not_found'});
-    if(!who.uid||(!who.isAdmin&&String(session.uid)!==String(who.uid))) return json(res,403,{error:'session_owner_required'});
+    let detail={}; try { detail=JSON.parse((await readBody(req)).toString()||'{}'); } catch {}
+    if(!sessionAllowed(session,who,detail.shareToken)) return json(res,403,{error:'session_owner_required'});
     const requested=await forceSaveSession(session,'editor_close');
     await persistSessions();
     return json(res,requested?200:503,{ok:requested,requested});
@@ -522,7 +624,7 @@ async function handle(req,res) {
     } catch(error){log('ERROR','cannot open document',`${s.path} ${error.message}`);json(res,error?.code==='EACCES'?403:404,{error:error?.code==='EACCES'?'file_access_denied':'file_not_found'});}
     return;
   }
-  const cm=u.pathname.match(/^\/internal\/onlyoffice\/callback\/([^/]+)$/);if(cm&&req.method==='POST'){const s=sessions.get(cm[1]);if(!s||!validSign(s.id,u.searchParams.get('token')))return json(res,403,{error:'invalid_token'});const auth=req.headers[String(config.jwtHeader||'Authorization').toLowerCase()];if(auth&&config.jwtSecret&&!verifyJwt(auth,config.jwtSecret))return json(res,403,{error:'invalid_jwt'});try{const data=JSON.parse((await readBody(req)).toString()||'{}');const status=Number(data.status);s.lastSeen=Date.now();log('INFO','callback',`id=${s.id} status=${status} url=${data.url||''}`);if([2,6].includes(status)&&data.url){const editedUrl=normalizeOnlyOfficeDownload(data.url);const edited=await fetch(editedUrl).then(r=>{if(!r.ok)throw new Error(`download ${r.status}`);return r.arrayBuffer();});log('INFO','callback download',`id=${s.id} bytes=${edited.byteLength} url=${editedUrl}`);await atomicReplace(s.path,edited,s);s.forceSaveRequestedAt=0;if(status===2) await dropSession(s.id,'saved'); else {s.idleSaveCompletedAt=Date.now();await persistSessions();log('INFO','callback saved',`id=${s.id} file=${s.path} mode=forcesave`);}}else if(status===4){await dropSession(s.id,'callback_closed');}else if([3,7].includes(status)){s.error=String(status);s.forceSaveRequestedAt=0;await persistSessions();}return json(res,200,{error:0});}catch(e){log('ERROR','callback save failed',`${s.path} ${e.stack||e.message}`);s.forceSaveRequestedAt=0;await persistSessions().catch(()=>{});return json(res,500,{error:1,message:e.message});}}
+  const cm=u.pathname.match(/^\/internal\/onlyoffice\/callback\/([^/]+)$/);if(cm&&req.method==='POST'){const s=sessions.get(cm[1]);if(!s||!validSign(s.id,u.searchParams.get('token')))return json(res,403,{error:'invalid_token'});const auth=req.headers[String(config.jwtHeader||'Authorization').toLowerCase()];if(auth&&config.jwtSecret&&!verifyJwt(auth,config.jwtSecret))return json(res,403,{error:'invalid_jwt'});try{const data=JSON.parse((await readBody(req)).toString()||'{}');const status=Number(data.status);s.lastSeen=Date.now();log('INFO','callback',`id=${s.id} status=${status} url=${data.url||''}`);if([2,6].includes(status)&&data.url){const editedUrl=normalizeOnlyOfficeDownload(data.url);const edited=await fetch(editedUrl).then(r=>{if(!r.ok)throw new Error(`download ${r.status}`);return r.arrayBuffer();});log('INFO','callback download',`id=${s.id} bytes=${edited.byteLength} url=${editedUrl}`);await atomicReplace(s.path,edited,s);s.forceSaveRequestedAt=0;s.lastSavedAt=Date.now();if(status===2) await dropSession(s.id,'saved'); else {s.idleSaveCompletedAt=Date.now();await persistSessions();log('INFO','callback saved',`id=${s.id} file=${s.path} mode=forcesave`);}}else if(status===4){await dropSession(s.id,'callback_closed');}else if([3,7].includes(status)){s.error=String(status);s.forceSaveRequestedAt=0;await persistSessions();}return json(res,200,{error:0});}catch(e){log('ERROR','callback save failed',`${s.path} ${e.stack||e.message}`);s.forceSaveRequestedAt=0;await persistSessions().catch(()=>{});return json(res,500,{error:1,message:e.message});}}
   if(u.pathname.startsWith('/onlyoffice/')) return proxyHttp(req,res,config.onlyOfficeUrl,u.pathname.replace('/onlyoffice','')+(u.search||''));
   if(u.pathname==='/'||u.pathname==='/settings'||u.pathname==='/open'||u.pathname==='/auth-callback.html'){const file=path.join(uiDir,u.pathname==='/open'?'open.html':u.pathname==='/auth-callback.html'?'auth-callback.html':'index.html');return serveFile(res,file,'text/html; charset=utf-8');}
   if(['/settings.js','/open.js','/auth-callback.js','/trim-web-app.js'].includes(u.pathname))return serveFile(res,path.join(uiDir,u.pathname.slice(1)),'application/javascript; charset=utf-8');
