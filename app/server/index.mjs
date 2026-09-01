@@ -24,7 +24,7 @@ const sharesPath = path.join(varDir, 'shares.json');
 const packageRoot = fs.existsSync(path.join(appDest,'app')) ? path.join(appDest,'app') : appDest;
 // Keep this build-time value in sync with manifest. fnOS deploys application
 // files separately from the manifest, so reading it at runtime is unreliable.
-const appVersion = '0.4.79-pre';
+const appVersion = '0.4.80-pre';
 const uiDir = path.join(packageRoot,'ui');
 const composeDir = path.join(packageRoot,'docker');
 const bridgeDir = path.join(composeDir,'onlyoffice','bridge');
@@ -106,10 +106,11 @@ function publicBase(req) {
   return host?`${proto}://${host}`:String(config.publicBaseUrl||'http://localhost').replace(/\/$/, '');
 }
 function shareUrl(req,token) { return `${publicBase(req)}/app/FnOffice/share/${encodeURIComponent(token)}`; }
+function normalizeShareToken(token) { try { return decodeURIComponent(String(token||'')).trim(); } catch { return String(token||'').trim(); } }
 function sharesFor(ownerUid,file) { return [...shares.values()].filter(s=>s&&String(s.ownerUid)===String(ownerUid)&&s.path===file).sort((a,b)=>Number(b.createdAt||0)-Number(a.createdAt||0)); }
 function publicShare(share,req) { return {active:share.active===true,permissions:{read:true,download:share.permissions?.download===true,write:share.permissions?.write===true},createdAt:share.createdAt,revokedAt:share.revokedAt||null,url:shareUrl(req,share.token)}; }
 async function validShare(token,need='read') {
-  const share=shares.get(String(token||''));
+  const normalizedToken=normalizeShareToken(token); const share=shares.get(normalizedToken);
   if(!share||share.active!==true||share.permissions?.read!==true) return null;
   if(need==='download'&&share.permissions?.download!==true) return null;
   if(need==='write'&&share.permissions?.write!==true) return null;
@@ -490,14 +491,14 @@ async function handle(req,res) {
     try { const file=canonicalFile(u.searchParams.get('path')); if(!who.uid||!(await checkAcl(file,who,'read'))) return json(res,403,{error:'file_access_denied'}); await saveLatestBeforeDownload(file); return sendAttachment(res,file,path.basename(file)); }
     catch(error) { return json(res,400,{error:'download_failed',message:error.message}); }
   }
-  const publicDownload=u.pathname.match(/^\/share\/([^/]+)\/download$/);
+  const publicDownload=u.pathname.match(/^\/share\/([^/]+)\/?$/);
   if(publicDownload&&req.method==='GET') { const share=await validShare(publicDownload[1],'download'); if(!share)return json(res,404,{error:'share_not_found'}); await saveLatestBeforeDownload(share.path); return sendAttachment(res,share.path,path.basename(share.path)); }
-  const publicOpen=u.pathname.match(/^\/share\/([^/]+)$/);
-  if(publicOpen&&req.method==='GET') { const share=await validShare(publicOpen[1],'read'); if(!share){res.writeHead(404,{'content-type':'text/plain; charset=utf-8'});return res.end('分享链接不存在、已撤回或无权访问。');} return serveFile(res,path.join(uiDir,'open.html'),'text/html; charset=utf-8'); }
+  const publicOpen=u.pathname.match(/^\/share\/([^/]+)\/?$/);
+  if(publicOpen&&req.method==='GET') { const share=await validShare(publicOpen[1],'read'); if(!share){log('WARN','share token rejected',`token=${normalizeShareToken(publicOpen[1]).slice(0,12)} host=${req.headers.host||''}`);res.writeHead(404,{'content-type':'text/plain; charset=utf-8'});return res.end('分享链接不存在、已撤回或无权访问。');} return serveFile(res,path.join(uiDir,'open.html'),'text/html; charset=utf-8'); }
   if (u.pathname==='/api/editor-session' && req.method==='POST') {
     try {
       const input=JSON.parse((await readBody(req)).toString()||'{}');
-      const shareToken=String(input.shareToken||''); const share=shareToken?await validShare(shareToken,'read'):null;
+      const shareToken=normalizeShareToken(input.shareToken); const share=shareToken?await validShare(shareToken,'read'):null;
       if(shareToken&&!share) return json(res,404,{error:'share_not_found'});
       const editorUser=share?{uid:String(share.ownerUid),username:'共享访客',isAdmin:false}:who;
       const file=share?share.path:canonicalFile(input.path);

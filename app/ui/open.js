@@ -2,7 +2,7 @@ import { TrimApp } from '/app/FnOffice/trim-web-app.js?v=0.4.59';
 
 const pageUrl = new URL(location.href);
 const filePath = pageUrl.searchParams.get('path');
-const shareToken = pageUrl.pathname.match(/\/share\/([^/]+)$/)?.[1] || '';
+const shareToken = (() => { const raw=pageUrl.pathname.match(/\/share\/([^/]+)\/?$/)?.[1] || ''; try { return decodeURIComponent(raw); } catch { return raw; } })();
 const manageShareToken = pageUrl.searchParams.get('manageShare') || '';
 const reshareRequested = pageUrl.searchParams.get('reshare') === '1';
 const msg = document.getElementById('message');
