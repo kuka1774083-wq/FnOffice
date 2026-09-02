@@ -2,6 +2,11 @@
 .font-status{position:fixed;left:24px;right:180px;bottom:52px;z-index:11;min-height:20px;padding:2px 8px;background:rgba(245,247,251,.96);color:#334155;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 @media (max-width:640px){.font-status{left:12px;right:150px;bottom:40px;font-size:13px}}
 .save-progress{z-index:20;background:#fff}
+.save-progress{appearance:none;border:1px solid #cbd5e1;border-radius:6px;overflow:hidden;background:#e2e8f0}
+.save-progress::-webkit-progress-bar{background:#e2e8f0;border-radius:6px}
+.save-progress::-webkit-progress-value{background:linear-gradient(90deg,#2563eb 0%,#60a5fa 45%,#2563eb 90%);background-size:200% 100%;animation:font-progress 1.4s linear infinite;border-radius:6px}
+.save-progress::-moz-progress-bar{background:linear-gradient(90deg,#2563eb 0%,#60a5fa 45%,#2563eb 90%);background-size:200% 100%;animation:font-progress 1.4s linear infinite;border-radius:6px}
+@keyframes font-progress{from{background-position:0 0}to{background-position:200% 0}}
 .font-status{z-index:21;background:#f5f7fb}
 .font-busy{position:fixed;inset:0;z-index:19;background:rgba(245,247,251,.35);cursor:wait}
 .font-busy span{position:fixed;left:24px;bottom:70px;color:#334155}
