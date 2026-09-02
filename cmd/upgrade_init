@@ -9,8 +9,12 @@ mkdir -p "$backup" 2>/dev/null || exit 0
 for pair in "fonts:enabled" "fonts-disabled:disabled"; do
   src_name="${pair%%:*}"; dst_name="${pair##*:}"
   for src in "$var_dir/$src_name" "$app_dest/app/docker/onlyoffice/$src_name" "$app_dest/docker/onlyoffice/$src_name"; do
-    if [ -d "$src" ] && [ ! -e "$backup/$dst_name" ]; then
-      mv "$src" "$backup/$dst_name" 2>/dev/null || true
+    if [ -d "$src" ]; then
+      # Merge into the backup instead of skipping when a previous interrupted
+      # upgrade left a partial backup behind.
+      mkdir -p "$backup/$dst_name" 2>/dev/null || true
+      cp -a "$src/." "$backup/$dst_name/" 2>/dev/null || true
+      rm -rf "$src" 2>/dev/null || true
       break
     fi
   done
