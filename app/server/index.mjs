@@ -27,7 +27,7 @@ const sharesPath = path.join(varDir, 'shares.json');
 const packageRoot = fs.existsSync(path.join(appDest,'app')) ? path.join(appDest,'app') : appDest;
 // Keep this build-time value in sync with manifest. fnOS deploys application
 // files separately from the manifest, so reading it at runtime is unreliable.
-const appVersion = '0.6.1.2-pre1';
+const appVersion = '0.6.1.2-pre2';
 const uiDir = path.join(packageRoot,'ui');
 const composeDir = path.join(packageRoot,'docker');
 const bridgeDir = path.join(composeDir,'onlyoffice','bridge');
@@ -695,6 +695,7 @@ async function handle(req,res) {
   if(u.pathname.startsWith('/onlyoffice/')) return proxyHttp(req,res,config.onlyOfficeUrl,u.pathname.replace('/onlyoffice','')+(u.search||''));
   if(u.pathname==='/'||u.pathname==='/settings'||u.pathname==='/open'||u.pathname==='/fonts'||u.pathname==='/auth-callback.html'){const file=path.join(uiDir,u.pathname==='/open'?'open.html':u.pathname==='/fonts'?'fonts.html':u.pathname==='/auth-callback.html'?'auth-callback.html':'index.html');return serveFile(res,file,'text/html; charset=utf-8');}
   if(['/settings.js','/open.js','/fonts.js','/auth-callback.js','/trim-web-app.js'].includes(u.pathname))return serveFile(res,path.join(uiDir,u.pathname.slice(1)),'application/javascript; charset=utf-8');
+  if(u.pathname==='/fonts.css')return serveFile(res,path.join(uiDir,'fonts.css'),'text/css; charset=utf-8');
   if(u.pathname==='/style.css')return serveFile(res,path.join(uiDir,'style.css'),'text/css; charset=utf-8');
   return json(res,404,{error:'not_found'});
 }
