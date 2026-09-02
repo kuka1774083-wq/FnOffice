@@ -2,8 +2,9 @@ const base='/app/FnOffice';
 const status=document.getElementById('status');
 const state={enabled:[],disabled:[],ops:new Map(),files:new Map()};
 const busyKey='FnOffice.fonts.apply.busy';
-function setBusy(value){const el=document.getElementById('fontBusy');if(value){localStorage.setItem(busyKey,String(Date.now()));el.hidden=false}else{localStorage.removeItem(busyKey);el.hidden=true}}
-function restoreBusy(){const started=Number(localStorage.getItem(busyKey)||0);if(started&&Date.now()-started<20*60*1000)setBusy(true);else setBusy(false)}
+function setBusy(value){const el=document.getElementById('fontBusy'),save=document.getElementById('saveAll');document.body.classList.toggle('font-is-busy',value);save.disabled=value;if(value){if(!localStorage.getItem(busyKey))localStorage.setItem(busyKey,String(Date.now()));el.hidden=false;status.textContent='正在处理字体，等待 Docker 重启，预计 5 到 10 分钟…'}else{localStorage.removeItem(busyKey);el.hidden=true}}
+function restoreBusy(){const started=Number(localStorage.getItem(busyKey)||0);if(started&&Date.now()-started<10*60*1000)setBusy(true);else setBusy(false)}
+setInterval(()=>{const started=Number(localStorage.getItem(busyKey)||0);if(started&&Date.now()-started>=10*60*1000)setBusy(false)},5000);
 const isFont=n=>/\.(ttf|otf|ttc|woff|woff2)$/i.test(n);
 function namesFor(kind){const pending=[...state.files].filter(([,item])=>item.target===kind).map(([name])=>name);return [...new Set([...(state[kind]||[]),...pending])].sort((a,b)=>a.localeCompare(b));}
 function render(kind){const q=document.getElementById(kind+'Filter').value.toLowerCase(),box=document.getElementById(kind);box.replaceChildren(...namesFor(kind).filter(n=>n.toLowerCase().includes(q)).map(name=>{const label=document.createElement('label');label.className='check-option';const input=document.createElement('input');input.type='checkbox';input.dataset.font=name;const pending=state.files.has(name),action=state.ops.get(name),span=document.createElement('span');span.textContent=`${pending?'[待上传] ':action==='delete'?'[待删除] ':action?'[待确认] ':''}${name}`;label.style.background=pending?'#e5e7eb':action==='delete'?'#fee2e2':action?'#fef3c7':'';label.append(input,span);return label}));}
