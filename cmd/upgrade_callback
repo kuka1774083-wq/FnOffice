@@ -5,6 +5,15 @@ set -eu
 # requests automatic OnlyOffice, replay the same lifecycle hook so a package
 # update can create or repair the containers without user shell access.
 app_dest="${TRIM_APPDEST:-/var/apps/FnOffice/target}"
+app_volume="$(dirname "$(dirname "$app_dest")")"
+var_dir="${TRIM_PKGVAR:-$app_volume/@appdata/FnOffice}"
+backup="$var_dir/.font-upgrade-backup"
+if [ -d "$backup" ]; then
+  mkdir -p "$var_dir" 2>/dev/null || true
+  [ -e "$var_dir/fonts" ] || mv "$backup/enabled" "$var_dir/fonts" 2>/dev/null || true
+  [ -e "$var_dir/fonts-disabled" ] || mv "$backup/disabled" "$var_dir/fonts-disabled" 2>/dev/null || true
+  rmdir "$backup" 2>/dev/null || true
+fi
 etc_dir="${TRIM_PKGETC:-}"
 if [ -z "$etc_dir" ]; then
   app_volume="$(dirname "$(dirname "$app_dest")")"

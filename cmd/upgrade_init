@@ -1,3 +1,18 @@
 #!/bin/sh
 set -eu
+# Keep both font lists outside the target while fnOS replaces package files.
+app_dest="${TRIM_APPDEST:-/var/apps/FnOffice/target}"
+app_volume="$(dirname "$(dirname "$app_dest")")"
+var_dir="${TRIM_PKGVAR:-$app_volume/@appdata/FnOffice}"
+backup="$var_dir/.font-upgrade-backup"
+mkdir -p "$backup" 2>/dev/null || exit 0
+for pair in "fonts:enabled" "fonts-disabled:disabled"; do
+  src_name="${pair%%:*}"; dst_name="${pair##*:}"
+  for src in "$var_dir/$src_name" "$app_dest/app/docker/onlyoffice/$src_name" "$app_dest/docker/onlyoffice/$src_name"; do
+    if [ -d "$src" ] && [ ! -e "$backup/$dst_name" ]; then
+      mv "$src" "$backup/$dst_name" 2>/dev/null || true
+      break
+    fi
+  done
+done
 exit 0
