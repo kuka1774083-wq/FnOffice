@@ -19,7 +19,7 @@ services:
       - ./onlyoffice/logs:/var/log/onlyoffice
       - ./onlyoffice/data:/var/www/onlyoffice/Data
       - ./onlyoffice/lib:/var/lib/onlyoffice
-      - ./onlyoffice/fonts:/usr/share/fonts/truetype/custom:ro
+      - ${FNOFFICE_FONTSDIR:-./onlyoffice/fonts}:/usr/share/fonts/truetype/custom:ro
     networks: [onlyoffice_internal]
   callback-relay:
     image: ${CALLBACK_IMAGE:-docker.m.daocloud.io/nginx:alpine}

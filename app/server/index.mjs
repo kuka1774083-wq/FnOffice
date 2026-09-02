@@ -31,8 +31,9 @@ const appVersion = '0.6.1.2.pre.2';
 const uiDir = path.join(packageRoot,'ui');
 const composeDir = path.join(packageRoot,'docker');
 const bridgeDir = path.join(composeDir,'onlyoffice','bridge');
-const fontsDir = path.join(composeDir,'onlyoffice','fonts');
-const disabledFontsDir = path.join(composeDir,'onlyoffice','fonts-disabled');
+const fontsDir = path.join(persistentVarDir,'fonts');
+const disabledFontsDir = path.join(persistentVarDir,'fonts-disabled');
+const legacyFontsDir = path.join(composeDir,'onlyoffice','fonts');
 const allowedExt = new Set(['doc','docx','docm','dot','dotx','odt','rtf','pdf','xls','xlsx','xlsm','xlt','xltx','ods','csv','ppt','pptx','pptm','pot','potx','odp']);
 const defaults = { installOnlyOffice:false, onlyOfficePort:18081, onlyOfficeUrl:'http://127.0.0.1:18081', browserOnlyOfficeMode:'auto', distinguishMobile:false, onlyOfficeImage:'docker.m.daocloud.io/onlyoffice/documentserver:latest', callbackImage:'docker.m.daocloud.io/nginx:alpine', publicBaseUrl:'', internalCallbackBaseUrl:'http://callback-relay:9000', useInternalCallbackRelay:true, documentKeyRevision:'bridge-v2', jwtSecret:'', jwtHeader:'Authorization', jwtInBody:false, editorLanguage:'zh-CN', coEditingMode:'fast', forceSave:true, maxGlobalDocuments:50, maxUserDocuments:10, sessionTtlMinutes:30, verifyTls:true };
 // Document Server caches conversion failures by document key. A process
@@ -49,6 +50,7 @@ const shares = new Map(Object.entries(readJson(sharesPath, {})));
 const IDLE_FORCE_SAVE_MS = 5 * 60 * 1000;
 
 await Promise.all([fsp.mkdir(etcDir,{recursive:true}),fsp.mkdir(varDir,{recursive:true}),fsp.mkdir(tmpDir,{recursive:true}),fsp.mkdir(composeDir,{recursive:true}),fsp.mkdir(bridgeDir,{recursive:true}),fsp.mkdir(fontsDir,{recursive:true}),fsp.mkdir(disabledFontsDir,{recursive:true})]);
+try { for(const name of await fsp.readdir(legacyFontsDir)){if(/\.(ttf|otf|ttc|woff|woff2)$/i.test(name)) await fsp.rename(path.join(legacyFontsDir,name),path.join(fontsDir,name)).catch(()=>{});} } catch {}
 let config = {...defaults, ...readJson(configPath, {})};
 // Existing installations created before 0.4.52 have their former defaults
 // persisted as 10 / 3.  Migrate only that exact untouched pair once: values
@@ -238,7 +240,7 @@ async function atomicReplace(file,contents,session) {
 }
 function bridgePath(session) { return path.join(bridgeDir,`${session.id}.${extOf(session.path)}`); }
 async function removeBridge(session) { if(session?.bridgeFile) await fsp.rm(session.bridgeFile,{force:true}).catch(()=>{}); }
-async function syncCompose() { const env=`ONLYOFFICE_PORT=${config.onlyOfficePort}\nONLYOFFICE_IMAGE=${config.onlyOfficeImage||defaults.onlyOfficeImage}\nCALLBACK_IMAGE=${config.callbackImage||defaults.callbackImage}\nJWT_SECRET=${config.jwtSecret}\nFNOFFICE_APPDEST=${appDest}\n`; await fsp.writeFile(path.join(composeDir,'.env'),env,{mode:0o600}); }
+async function syncCompose() { const env=`ONLYOFFICE_PORT=${config.onlyOfficePort}\nONLYOFFICE_IMAGE=${config.onlyOfficeImage||defaults.onlyOfficeImage}\nCALLBACK_IMAGE=${config.callbackImage||defaults.callbackImage}\nJWT_SECRET=${config.jwtSecret}\nFNOFFICE_APPDEST=${appDest}\nFNOFFICE_FONTSDIR=${fontsDir}\n`; await fsp.writeFile(path.join(composeDir,'.env'),env,{mode:0o600}); }
 function probeOnlyOffice() { return new Promise(resolve=>{ try { const u=new URL(config.onlyOfficeUrl); const client=u.protocol==='https:'?https:http; const req=client.request({hostname:u.hostname,port:u.port|| (u.protocol==='https:'?443:80),path:'/healthcheck',method:'GET',rejectUnauthorized:config.verifyTls,timeout:3000},r=>{r.resume();resolve(r.statusCode===200);}); req.on('timeout',()=>{req.destroy();resolve(false);}); req.on('error',()=>resolve(false)); req.end(); } catch { resolve(false); } }); }
 async function detectOnlyOfficeVersion() {
   try {

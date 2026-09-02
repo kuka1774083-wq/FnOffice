@@ -184,6 +184,7 @@ ONLYOFFICE_IMAGE=$onlyoffice_image
 CALLBACK_IMAGE=$callback_image
 JWT_SECRET=$secret
 FNOFFICE_APPDEST=$app_dest
+FNOFFICE_FONTSDIR=$font_data_dir
 EOF
 chmod 600 "$compose_dir/.env"
 if [ "$installFlag" = "false" ]; then
@@ -199,7 +200,8 @@ else
     onlyoffice_name="fnoffice-onlyoffice"
     relay_name="fnoffice-callback-relay"
     data_dir="$compose_dir/onlyoffice"
-    mkdir -p "$data_dir/logs" "$data_dir/data" "$data_dir/lib" "$data_dir/bridge" "$data_dir/fonts" "$data_dir/fonts-disabled"
+    font_data_dir="$pkg_var/fonts"
+    mkdir -p "$data_dir/logs" "$data_dir/data" "$data_dir/lib" "$data_dir/bridge" "$font_data_dir" "$pkg_var/fonts-disabled"
     image_log="$pkg_tmp/onlyoffice-image-pull.log"
     selected_image=""
     pull_timeout="${FNOFFICE_PULL_TIMEOUT:-600}"
@@ -270,7 +272,7 @@ else
       -v "$data_dir/logs:/var/log/onlyoffice" \
       -v "$data_dir/data:/var/www/onlyoffice/Data" \
       -v "$data_dir/lib:/var/lib/onlyoffice" \
-      -v "$data_dir/fonts:/usr/share/fonts/truetype/custom:ro" \
+      -v "$font_data_dir:/usr/share/fonts/truetype/custom:ro" \
       "$onlyoffice_image" 2>"$container_create_log")"; then
       echo "OnlyOffice Docker 创建失败，详见 $container_create_log" > "$error_file"
       exit 1
