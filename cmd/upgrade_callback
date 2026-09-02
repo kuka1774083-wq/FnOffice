@@ -10,8 +10,16 @@ var_dir="${TRIM_PKGVAR:-$app_volume/@appdata/FnOffice}"
 backup="$var_dir/.font-upgrade-backup"
 if [ -d "$backup" ]; then
   mkdir -p "$var_dir" 2>/dev/null || true
-  [ -e "$var_dir/fonts" ] || mv "$backup/enabled" "$var_dir/fonts" 2>/dev/null || true
-  [ -e "$var_dir/fonts-disabled" ] || mv "$backup/disabled" "$var_dir/fonts-disabled" 2>/dev/null || true
+  # install_callback may already have created empty directories. Replace them
+  # with the protected copies instead of treating their existence as success.
+  if [ -d "$backup/enabled" ]; then
+    rm -rf "$var_dir/fonts" 2>/dev/null || true
+    mv "$backup/enabled" "$var_dir/fonts" 2>/dev/null || true
+  fi
+  if [ -d "$backup/disabled" ]; then
+    rm -rf "$var_dir/fonts-disabled" 2>/dev/null || true
+    mv "$backup/disabled" "$var_dir/fonts-disabled" 2>/dev/null || true
+  fi
   rmdir "$backup" 2>/dev/null || true
 fi
 etc_dir="${TRIM_PKGETC:-}"
