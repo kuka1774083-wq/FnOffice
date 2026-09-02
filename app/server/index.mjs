@@ -380,7 +380,10 @@ async function restartCompose() { return; }
 function restartOnlyOffice() {
   return new Promise((resolve,reject)=>execFile('docker',['restart','fnoffice-onlyoffice'],{timeout:30000},(error,stdout,stderr)=>{
     if(error){log('WARN','font manager could not restart OnlyOffice',error.message);return reject(error);}
-    execFile('docker',['exec','fnoffice-onlyoffice','fc-cache','-f'],{timeout:60000},cacheError=>{if(cacheError)log('WARN','font cache refresh failed',cacheError.message);resolve(String(stdout||'').trim());});
+    // Document Server keeps its own font list in addition to the system
+    // fontconfig cache. Regenerate both so newly uploaded fonts appear in the
+    // editor without requiring a second container recreation.
+    execFile('docker',['exec','fnoffice-onlyoffice','sh','-lc','fc-cache -f -v >/dev/null 2>&1 || true; if [ -x /usr/bin/documentserver-generate-allfonts.sh ]; then /usr/bin/documentserver-generate-allfonts.sh >/dev/null 2>&1 || true; elif [ -x /var/www/onlyoffice/documentserver/server/tools/allfontsgen ]; then /var/www/onlyoffice/documentserver/server/tools/allfontsgen >/dev/null 2>&1 || true; fi; fc-cache -f >/dev/null 2>&1 || true'],{timeout:180000},cacheError=>{if(cacheError)log('WARN','font cache refresh failed',cacheError.message);resolve(String(stdout||'').trim());});
   }));
 }
 function dockerRun(args,timeout=30000){
