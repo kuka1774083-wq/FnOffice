@@ -31,6 +31,8 @@ const appVersion = '0.6.0.1';
 const uiDir = path.join(packageRoot,'ui');
 const composeDir = path.join(packageRoot,'docker');
 const bridgeDir = path.join(composeDir,'onlyoffice','bridge');
+const fontsDir = path.join(composeDir,'onlyoffice','fonts');
+const disabledFontsDir = path.join(composeDir,'onlyoffice','fonts-disabled');
 const allowedExt = new Set(['doc','docx','docm','dot','dotx','odt','rtf','pdf','xls','xlsx','xlsm','xlt','xltx','ods','csv','ppt','pptx','pptm','pot','potx','odp']);
 const defaults = { installOnlyOffice:false, onlyOfficePort:18081, onlyOfficeUrl:'http://127.0.0.1:18081', browserOnlyOfficeMode:'auto', distinguishMobile:false, onlyOfficeImage:'docker.m.daocloud.io/onlyoffice/documentserver:latest', callbackImage:'docker.m.daocloud.io/nginx:alpine', publicBaseUrl:'', internalCallbackBaseUrl:'http://callback-relay:9000', useInternalCallbackRelay:true, documentKeyRevision:'bridge-v2', jwtSecret:'', jwtHeader:'Authorization', jwtInBody:false, editorLanguage:'zh-CN', coEditingMode:'fast', forceSave:true, maxGlobalDocuments:50, maxUserDocuments:10, sessionTtlMinutes:30, verifyTls:true };
 // Document Server caches conversion failures by document key. A process
@@ -46,7 +48,7 @@ const sessions = new Map();
 const shares = new Map(Object.entries(readJson(sharesPath, {})));
 const IDLE_FORCE_SAVE_MS = 5 * 60 * 1000;
 
-await Promise.all([fsp.mkdir(etcDir,{recursive:true}),fsp.mkdir(varDir,{recursive:true}),fsp.mkdir(tmpDir,{recursive:true}),fsp.mkdir(composeDir,{recursive:true}),fsp.mkdir(bridgeDir,{recursive:true})]);
+await Promise.all([fsp.mkdir(etcDir,{recursive:true}),fsp.mkdir(varDir,{recursive:true}),fsp.mkdir(tmpDir,{recursive:true}),fsp.mkdir(composeDir,{recursive:true}),fsp.mkdir(bridgeDir,{recursive:true}),fsp.mkdir(fontsDir,{recursive:true}),fsp.mkdir(disabledFontsDir,{recursive:true})]);
 let config = {...defaults, ...readJson(configPath, {})};
 // Existing installations created before 0.4.52 have their former defaults
 // persisted as 10 / 3.  Migrate only that exact untouched pair once: values
@@ -375,6 +377,31 @@ function normalizeOnlyOfficeDownload(raw) {
 // Containers are created by the privileged installation callback with
 // `docker run`; the gateway process must not create or alter Compose projects.
 async function restartCompose() { return; }
+function restartOnlyOffice() {
+  return new Promise((resolve,reject)=>execFile('docker',['restart','fnoffice-onlyoffice'],{timeout:30000},(error,stdout,stderr)=>{
+    if(error){log('WARN','font manager could not restart OnlyOffice',error.message);return reject(error);}
+    execFile('docker',['exec','fnoffice-onlyoffice','fc-cache','-f'],{timeout:60000},cacheError=>{if(cacheError)log('WARN','font cache refresh failed',cacheError.message);resolve(String(stdout||'').trim());});
+  }));
+}
+function dockerRun(args,timeout=30000){
+  return new Promise((resolve,reject)=>{
+    execFile('docker',args,{timeout},(error,stdout)=>error?reject(error):resolve(String(stdout||'')));
+  });
+}
+async function syncFontsToContainer(){
+  try {
+    const mounts=await dockerRun(['inspect','-f','{{range .Mounts}}{{.Destination}} {{end}}','fnoffice-onlyoffice']);
+    if(String(mounts).includes('/usr/share/fonts/truetype/custom')) return;
+    // Older containers may not have the font volume yet. Copy the active set
+    // into the container so the manager also works before the next reinstall.
+    await dockerRun(['exec','fnoffice-onlyoffice','sh','-c','rm -rf /usr/share/fonts/truetype/custom && mkdir -p /usr/share/fonts/truetype/custom']);
+    for(const name of await listFonts().then(x=>x.enabled)) await dockerRun(['cp',path.join(fontsDir,name),`fnoffice-onlyoffice:/usr/share/fonts/truetype/custom/${name}`]);
+  } catch(error) { log('WARN','font sync to OnlyOffice failed',error.message); throw error; }
+}
+const fontExtension=/\.(ttf|otf|ttc|woff|woff2)$/i;
+function safeFontName(value){const name=path.basename(String(value||''));return fontExtension.test(name)&&name.length<=180&&!/[\r\n]/.test(name)?name:'';}
+async function listFonts(){const read=async dir=>{try{return (await fsp.readdir(dir,{withFileTypes:true})).filter(e=>e.isFile()&&fontExtension.test(e.name)).map(e=>e.name).sort((a,b)=>a.localeCompare(b));}catch{return []}};return {enabled:await read(fontsDir),disabled:await read(disabledFontsDir)};}
+async function readMultipartFile(req){const type=String(req.headers['content-type']||'');const match=type.match(/boundary=(?:"([^"]+)"|([^;]+))/i);if(!match)throw new Error('multipart_boundary_missing');const boundary=Buffer.from(`--${match[1]||match[2]}`);const body=await readBody(req);const start=body.indexOf(Buffer.from('\r\n\r\n'));if(start<0)throw new Error('multipart_file_missing');const disposition=body.subarray(0,start).toString();const nameMatch=disposition.match(/filename="([^"]+)"/i);const name=safeFontName(nameMatch?.[1]);if(!name)throw new Error('unsupported_font');let end=body.indexOf(Buffer.from('\r\n'),start+4);let dataEnd=body.indexOf(boundary,start+4);if(dataEnd<0) dataEnd=body.length;if(dataEnd>=2&&body[dataEnd-2]===13&&body[dataEnd-1]===10)dataEnd-=2;const data=body.subarray(start+4,dataEnd);if(!data.length)throw new Error('empty_font');return {name,data};}
 function proxyHttp(req,res,target,pathName) {
   const u=new URL(target); const client=u.protocol==='https:'?https:http;
   const headers=onlyOfficeProxyHeaders(req,target);
@@ -439,6 +466,9 @@ async function handle(req,res) {
   // cannot bypass that gateway visibility rule.
   const who=userFrom(req);
   if (u.pathname.startsWith('/share') || u.pathname==='/api/shares' || u.pathname==='/api/share-records') return json(res,404,{error:'sharing_removed'});
+  if ((u.pathname==='/fonts'||u.pathname==='/api/fonts'||u.pathname==='/api/fonts/upload'||u.pathname==='/api/fonts/action')&&!who.isAdmin) {
+    return u.pathname==='/fonts'?json(res,403,{error:'admin_required'}):json(res,403,{error:'admin_required'});
+  }
   if ((u.pathname==='/' || u.pathname==='/settings' || u.pathname==='/api/config') && !who.isAdmin) {
     if (u.pathname==='/api/config') return json(res,403,{error:'admin_required'});
     res.writeHead(403, {'content-type':'text/plain; charset=utf-8', 'cache-control':'no-store'});
@@ -447,6 +477,9 @@ async function handle(req,res) {
   if(u.pathname==='/api/health'){const connected=await probeOnlyOffice();const version=(connected?await detectOnlyOfficeVersion():'')||await detectDockerOnlyOfficeVersion();log('INFO','health',`connected=${connected} version=${version||'unknown'} onlyOffice=${config.onlyOfficeUrl}`);return json(res,connected?200:503,{ok:connected,onlyOfficeUrl:config.onlyOfficeUrl,onlyOfficePort:config.onlyOfficePort,onlyOfficeVersion:version||null,reason:connected?'ready':'onlyoffice_unreachable'});}
   if(u.pathname==='/api/config'&&req.method==='GET'){const who=userFrom(req);return json(res,200,{...config,appVersion,jwtSecret:who.isAdmin?config.jwtSecret:(config.jwtSecret?'********':'')});}
   if(u.pathname==='/api/config'&&req.method==='PUT'){const who=userFrom(req);if(!who.isAdmin)return json(res,403,{error:'admin_required'});const old={...config};try{const next=JSON.parse((await readBody(req)).toString()||'{}');const port=Number(next.onlyOfficePort);if(!Number.isInteger(port)||port<1024||port>65535)throw new Error('invalid port');if(next.jwtSecret==='********')next.jwtSecret=old.jwtSecret;const oldLocal=`http://127.0.0.1:${old.onlyOfficePort}`;const shouldSyncLocal=!next.onlyOfficeUrl||next.onlyOfficeUrl===oldLocal;config={...old,...next,onlyOfficePort:port,onlyOfficeUrl:shouldSyncLocal?`http://127.0.0.1:${port}`:next.onlyOfficeUrl};await writeJson(configPath,config);await syncCompose();await restartCompose();return json(res,200,{...config,jwtSecret:config.jwtSecret?'********':''});}catch(e){config=old;await writeJson(configPath,config);return json(res,400,{error:'config_update_failed',message:e.message});}}
+  if(u.pathname==='/api/fonts'&&req.method==='GET') return json(res,200,await listFonts());
+  if(u.pathname==='/api/fonts/upload'&&req.method==='POST') { try { const {name,data}=await readMultipartFile(req); await fsp.writeFile(path.join(fontsDir,name),data,{flag:'wx',mode:0o644}); await syncFontsToContainer(); await restartOnlyOffice(); return json(res,200,{ok:true,name,fonts:await listFonts()}); } catch(e) { return json(res,400,{error:'font_upload_failed',message:e.message}); } }
+  if(u.pathname==='/api/fonts/action'&&req.method==='POST') { try { const input=JSON.parse((await readBody(req)).toString()||'{}'); const name=safeFontName(input.name); if(!name)throw new Error('unsupported_font'); const action=String(input.action||''); const active=path.join(fontsDir,name), disabled=path.join(disabledFontsDir,name); if(action==='disable'){await fsp.rename(active,disabled);} else if(action==='enable'){await fsp.rename(disabled,active);} else if(action==='delete'){await fsp.rm(active,{force:true});await fsp.rm(disabled,{force:true});} else throw new Error('invalid_action'); await syncFontsToContainer(); if(!String(await dockerRun(['inspect','-f','{{range .Mounts}}{{.Destination}} {{end}}','fnoffice-onlyoffice'])).includes('/usr/share/fonts/truetype/custom')) await dockerRun(['exec','fnoffice-onlyoffice','sh','-c',`rm -f '/usr/share/fonts/truetype/custom/${name.replace(/'/g,"'\\''")}'`]); await restartOnlyOffice(); return json(res,200,{ok:true,fonts:await listFonts()}); } catch(e) { return json(res,400,{error:'font_action_failed',message:e.message}); } }
   if(u.pathname==='/api/shares'&&req.method==='GET') {
     try {
       const file=canonicalFile(u.searchParams.get('path'));
@@ -655,8 +688,8 @@ async function handle(req,res) {
   }
   const cm=u.pathname.match(/^\/internal\/onlyoffice\/callback\/([^/]+)$/);if(cm&&req.method==='POST'){const s=sessions.get(cm[1]);if(!s||!validSign(s.id,u.searchParams.get('token')))return json(res,403,{error:'invalid_token'});const auth=req.headers[String(config.jwtHeader||'Authorization').toLowerCase()];if(auth&&config.jwtSecret&&!verifyJwt(auth,config.jwtSecret))return json(res,403,{error:'invalid_jwt'});try{const data=JSON.parse((await readBody(req)).toString()||'{}');const status=Number(data.status);s.lastSeen=Date.now();log('INFO','callback',`id=${s.id} status=${status} url=${data.url||''}`);if([2,6].includes(status)&&data.url){const editedUrl=normalizeOnlyOfficeDownload(data.url);const edited=await fetch(editedUrl).then(r=>{if(!r.ok)throw new Error(`download ${r.status}`);return r.arrayBuffer();});log('INFO','callback download',`id=${s.id} bytes=${edited.byteLength} url=${editedUrl}`);await atomicReplace(s.path,edited,s);s.forceSaveRequestedAt=0;s.lastSavedAt=Date.now();if(status===2) await dropSession(s.id,'saved'); else {s.idleSaveCompletedAt=Date.now();await persistSessions();log('INFO','callback saved',`id=${s.id} file=${s.path} mode=forcesave`);}}else if(status===4){await dropSession(s.id,'callback_closed');}else if([3,7].includes(status)){s.error=String(status);s.forceSaveRequestedAt=0;await persistSessions();}return json(res,200,{error:0});}catch(e){log('ERROR','callback save failed',`${s.path} ${e.stack||e.message}`);s.forceSaveRequestedAt=0;await persistSessions().catch(()=>{});return json(res,500,{error:1,message:e.message});}}
   if(u.pathname.startsWith('/onlyoffice/')) return proxyHttp(req,res,config.onlyOfficeUrl,u.pathname.replace('/onlyoffice','')+(u.search||''));
-  if(u.pathname==='/'||u.pathname==='/settings'||u.pathname==='/open'||u.pathname==='/auth-callback.html'){const file=path.join(uiDir,u.pathname==='/open'?'open.html':u.pathname==='/auth-callback.html'?'auth-callback.html':'index.html');return serveFile(res,file,'text/html; charset=utf-8');}
-  if(['/settings.js','/open.js','/auth-callback.js','/trim-web-app.js'].includes(u.pathname))return serveFile(res,path.join(uiDir,u.pathname.slice(1)),'application/javascript; charset=utf-8');
+  if(u.pathname==='/'||u.pathname==='/settings'||u.pathname==='/open'||u.pathname==='/fonts'||u.pathname==='/auth-callback.html'){const file=path.join(uiDir,u.pathname==='/open'?'open.html':u.pathname==='/fonts'?'fonts.html':u.pathname==='/auth-callback.html'?'auth-callback.html':'index.html');return serveFile(res,file,'text/html; charset=utf-8');}
+  if(['/settings.js','/open.js','/fonts.js','/auth-callback.js','/trim-web-app.js'].includes(u.pathname))return serveFile(res,path.join(uiDir,u.pathname.slice(1)),'application/javascript; charset=utf-8');
   if(u.pathname==='/style.css')return serveFile(res,path.join(uiDir,'style.css'),'text/css; charset=utf-8');
   return json(res,404,{error:'not_found'});
 }

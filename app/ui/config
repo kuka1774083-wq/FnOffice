@@ -4,6 +4,10 @@
       "title": "FnOffice 设置", "icon": "images/icon_{0}.png", "type": "iframe", "protocol": "",
       "gatewayPrefix": "/app/FnOffice", "gatewaySocket": "app.sock", "url": "/app/FnOffice", "allUsers": false
     },
+    "FnOffice.fonts": {
+      "title": "Office字体管理", "icon": "images/icon_{0}.png", "type": "iframe", "protocol": "",
+      "gatewayPrefix": "/app/FnOffice", "gatewaySocket": "app.sock", "url": "/app/FnOffice/fonts", "allUsers": false
+    },
     "FnOffice.editor": {
       "title": "Office", "icon": "images/icon_{0}.png", "type": "iframe", "protocol": "",
       "gatewayPrefix": "/app/FnOffice", "gatewaySocket": "app.sock", "url": "/app/FnOffice/open", "allUsers": true,
