@@ -24,6 +24,7 @@ if [ -z "$pkg_etc" ]; then
 fi
 pkg_var="${TRIM_PKGVAR:-/var/apps/FnOffice/var}"
 pkg_tmp="${TRIM_PKGTMP:-/var/apps/FnOffice/tmp}"
+font_data_dir="$pkg_var/fonts"
 mkdir -p "$pkg_etc" "$pkg_var" "$pkg_tmp" 2>/dev/null || true
 active_pid=""
 cancel_file="${TRIM_INSTALL_CANCEL_FILE:-${TRIM_CANCEL_FILE:-$pkg_tmp/.install-cancel}}"
@@ -200,7 +201,6 @@ else
     onlyoffice_name="fnoffice-onlyoffice"
     relay_name="fnoffice-callback-relay"
     data_dir="$compose_dir/onlyoffice"
-    font_data_dir="$pkg_var/fonts"
     mkdir -p "$data_dir/logs" "$data_dir/data" "$data_dir/lib" "$data_dir/bridge" "$font_data_dir" "$pkg_var/fonts-disabled"
     image_log="$pkg_tmp/onlyoffice-image-pull.log"
     selected_image=""
