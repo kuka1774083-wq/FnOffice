@@ -2,8 +2,9 @@ const base='/app/FnOffice';
 const status=document.getElementById('status');
 const state={enabled:[],disabled:[],ops:new Map(),files:new Map()};
 const busyKey='FnOffice.fonts.apply.busy';
-function setBusy(value){const el=document.getElementById('fontBusy'),save=document.getElementById('saveAll');document.body.classList.toggle('font-is-busy',value);save.disabled=value;if(value){if(!localStorage.getItem(busyKey))localStorage.setItem(busyKey,String(Date.now()));el.hidden=false;status.textContent='正在处理字体，等待 Docker 重启，预计 5 到 10 分钟…'}else{localStorage.removeItem(busyKey);el.hidden=true}}
-function restoreBusy(){const started=Number(localStorage.getItem(busyKey)||0);if(started&&Date.now()-started<10*60*1000){setBusy(true);const progress=document.getElementById('saveProgress');progress.style.display='block';progress.removeAttribute('value')}else setBusy(false)}
+const busyVersion='0.6.1.2.pre.16';
+function setBusy(value){const el=document.getElementById('fontBusy'),save=document.getElementById('saveAll');document.body.classList.toggle('font-is-busy',value);save.disabled=value;if(value){if(!localStorage.getItem(busyKey))localStorage.setItem(busyKey,String(Date.now()));localStorage.setItem(`${busyKey}.version`,busyVersion);el.hidden=false;status.textContent='正在处理字体，等待 Docker 重启，预计 5 到 10 分钟…'}else{localStorage.removeItem(busyKey);localStorage.removeItem(`${busyKey}.version`);el.hidden=true}}
+function restoreBusy(){const started=Number(localStorage.getItem(busyKey)||0),version=localStorage.getItem(`${busyKey}.version`);if(version!==busyVersion){setBusy(false);return}if(started&&Date.now()-started<10*60*1000){setBusy(true);const progress=document.getElementById('saveProgress');progress.style.display='block';progress.removeAttribute('value')}else setBusy(false)}
 setInterval(()=>{const started=Number(localStorage.getItem(busyKey)||0);if(started&&Date.now()-started>=10*60*1000)setBusy(false)},5000);
 const isFont=n=>/\.(ttf|otf|ttc|woff|woff2)$/i.test(n);
 function namesFor(kind){const pending=[...state.files].filter(([,item])=>item.target===kind).map(([name])=>name);return [...new Set([...(state[kind]||[]),...pending])].sort((a,b)=>a.localeCompare(b));}
